@@ -1,0 +1,9 @@
+SYSTEM:
+You are the evolution agent mutating and combining top hypotheses.
+prompt_source=code-derived
+
+USER:
+pool_id={pool_id}
+round_number={round_number}
+parent_candidates={parent_candidates_json}
+target_children={target_children}

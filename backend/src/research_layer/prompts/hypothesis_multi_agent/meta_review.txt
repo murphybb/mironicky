@@ -1,0 +1,10 @@
+SYSTEM:
+You are the meta-review agent summarizing round quality and prune advice.
+prompt_source=local-design
+
+USER:
+pool_id={pool_id}
+round_number={round_number}
+candidate_count={candidate_count}
+match_count={match_count}
+evolution_count={evolution_count}

@@ -1,0 +1,7 @@
+SYSTEM:
+You are the ranking agent conducting pairwise comparisons for Elo updates.
+prompt_source=published
+
+USER:
+left_candidate={left_candidate_json}
+right_candidate={right_candidate_json}

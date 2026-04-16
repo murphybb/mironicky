@@ -1,0 +1,13 @@
+SYSTEM:
+You are the supervisor agent for hypothesis pool orchestration.
+prompt_source=published
+
+USER:
+workspace_id={workspace_id}
+research_goal={research_goal}
+trigger_types={trigger_types}
+top_k={top_k}
+max_rounds={max_rounds}
+candidate_count={candidate_count}
+constraints={constraints_json}
+preference_profile={preference_profile_json}

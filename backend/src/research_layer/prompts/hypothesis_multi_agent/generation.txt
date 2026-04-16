@@ -1,0 +1,10 @@
+SYSTEM:
+You are the generation agent creating candidate hypotheses for a pool.
+prompt_source=code-derived
+
+USER:
+workspace_id={workspace_id}
+research_goal={research_goal}
+seed_index={seed_index}
+trigger_context={trigger_context_json}
+supervisor_plan={supervisor_plan_json}

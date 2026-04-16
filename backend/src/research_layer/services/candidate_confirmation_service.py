@@ -1,0 +1,512 @@
+from __future__ import annotations
+
+import re
+import sqlite3
+from dataclasses import dataclass
+
+from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.scholarly_source_service import ScholarlySourceService
+
+
+def normalize_candidate_text(text: str) -> str:
+    collapsed = re.sub(r"\s+", " ", text.strip())
+    return collapsed.lower()
+
+
+@dataclass(slots=True)
+class CandidateConfirmationError(Exception):
+    status_code: int
+    error_code: str
+    message: str
+    details: dict[str, object]
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class CandidateConfirmationService:
+    def __init__(self, store: ResearchApiStateStore) -> None:
+        self._store = store
+        self._active_statuses = {"active", "weakened", "conflicted", "failed"}
+        self._scholarly_source_service = ScholarlySourceService(store)
+
+    def _node_type_for_object_type(self, object_type: str) -> str:
+        return {
+            "evidence": "evidence",
+            "assumption": "assumption",
+            "conflict": "conflict",
+            "failure": "failure",
+            "validation": "validation",
+        }.get(object_type, "evidence")
+
+    def _edge_type_for_node_type(self, node_type: str) -> str:
+        if node_type == "assumption":
+            return "requires"
+        if node_type == "conflict":
+            return "conflicts"
+        if node_type == "failure":
+            return "weakens"
+        if node_type == "validation":
+            return "validates"
+        return "derives"
+
+    def _build_short_label(self, raw_text: str) -> str:
+        collapsed = re.sub(r"\s+", " ", str(raw_text or "").strip())
+        if not collapsed:
+            return "未命名节点"
+        sentence_parts = re.split(r"[。！？!?;；]\s*", collapsed)
+        first_sentence = next((part.strip() for part in sentence_parts if part.strip()), "")
+        preferred = first_sentence or collapsed
+        normalized_first_sentence = re.split(r"[。！？!?;；]\s*", collapsed)
+        if normalized_first_sentence:
+            preferred = normalized_first_sentence[0].strip() or preferred
+        max_len = 36
+        if len(preferred) <= max_len:
+            return preferred
+        return f"{preferred[:max_len].rstrip()}..."
+
+    def _build_source_refs(self, candidate: dict[str, object]) -> list[dict[str, object]]:
+        source_span = candidate.get("source_span")
+        normalized_span = source_span if isinstance(source_span, dict) else {}
+        return [
+            {
+                "source_id": str(candidate.get("source_id", "")),
+                "candidate_id": str(candidate.get("candidate_id", "")),
+                "candidate_batch_id": candidate.get("candidate_batch_id"),
+                "source_span": normalized_span,
+            }
+        ]
+
+    def _list_active_nodes(
+        self, workspace_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[dict[str, object]]:
+        return [
+            node
+            for node in self._store.list_graph_nodes(workspace_id, conn=conn)
+            if str(node.get("status")) in self._active_statuses
+        ]
+
+    def _list_active_edges(
+        self, workspace_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[dict[str, object]]:
+        return [
+            edge
+            for edge in self._store.list_graph_edges(workspace_id, conn=conn)
+            if str(edge.get("status")) in self._active_statuses
+        ]
+
+    def _resolve_active_node_by_object_ref(
+        self,
+        *,
+        workspace_id: str,
+        object_ref_type: str,
+        object_ref_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        matched = [
+            node
+            for node in self._list_active_nodes(workspace_id, conn=conn)
+            if str(node["object_ref_type"]) == object_ref_type
+            and str(node["object_ref_id"]) == object_ref_id
+        ]
+        if not matched:
+            return None
+        return matched[-1]
+
+    def _materialize_graph_version_for_confirmation(
+        self,
+        *,
+        candidate: dict[str, object],
+        formal_object: dict[str, str],
+        request_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        workspace_id = str(candidate["workspace_id"])
+        source_id = str(candidate["source_id"])
+        candidate_id = str(candidate["candidate_id"])
+        object_type = str(formal_object["object_type"])
+        object_id = str(formal_object["object_id"])
+
+        node = self._resolve_active_node_by_object_ref(
+            workspace_id=workspace_id,
+            object_ref_type=object_type,
+            object_ref_id=object_id,
+            conn=conn,
+        )
+        node_created = False
+        if node is None:
+            node = self._store.create_graph_node(
+                workspace_id=workspace_id,
+                node_type=self._node_type_for_object_type(object_type),
+                object_ref_type=object_type,
+                object_ref_id=object_id,
+                short_label=self._build_short_label(str(candidate["text"])),
+                full_description=str(candidate["text"]),
+                source_refs=self._build_source_refs(candidate),
+                status="active",
+                conn=conn,
+            )
+            node_created = True
+
+        confirmed_objects = self._store.list_confirmed_objects(workspace_id, conn=conn)
+        object_source_map = {
+            str(item["object_id"]): str(item["source_id"]) for item in confirmed_objects
+        }
+        same_source_nodes = [
+            item
+            for item in self._list_active_nodes(workspace_id, conn=conn)
+            if str(item["node_id"]) != str(node["node_id"])
+            and object_source_map.get(str(item["object_ref_id"])) == source_id
+        ]
+        evidence_anchor = next(
+            (item for item in same_source_nodes if str(item["node_type"]) == "evidence"),
+            None,
+        )
+        anchor = evidence_anchor or (same_source_nodes[0] if same_source_nodes else None)
+
+        edge_ids: list[str] = []
+        if anchor is not None and str(anchor["node_id"]) != str(node["node_id"]):
+            edge_type = self._edge_type_for_node_type(str(node["node_type"]))
+            existing_edge = self._store.find_graph_edge_by_ref(
+                workspace_id=workspace_id,
+                source_node_id=str(anchor["node_id"]),
+                target_node_id=str(node["node_id"]),
+                edge_type=edge_type,
+                object_ref_type=object_type,
+                object_ref_id=object_id,
+                conn=conn,
+            )
+            edge = existing_edge
+            if edge is None or str(edge.get("status")) not in self._active_statuses:
+                edge = self._store.create_graph_edge(
+                    workspace_id=workspace_id,
+                    source_node_id=str(anchor["node_id"]),
+                    target_node_id=str(node["node_id"]),
+                    edge_type=edge_type,
+                    object_ref_type=object_type,
+                    object_ref_id=object_id,
+                    strength=0.8,
+                    status="active",
+                    conn=conn,
+                )
+            edge_ids.append(str(edge["edge_id"]))
+
+        diff_payload = {
+            "change_type": "candidate_confirm_materialization",
+            "candidate_id": candidate_id,
+            "candidate_batch_id": candidate.get("candidate_batch_id"),
+            "formal_object_type": object_type,
+            "formal_object_id": object_id,
+            "source_id": source_id,
+            "request_id": request_id,
+            "added": {
+                "nodes": [str(node["node_id"])] if node_created else [],
+                "edges": edge_ids,
+            },
+            "archived": {"nodes": [], "edges": []},
+            "weakened": {"nodes": [], "edges": [], "routes": []},
+            "invalidated": {"nodes": [], "edges": [], "routes": []},
+            "branch_changes": {
+                "created_branch_node_ids": [],
+                "created_branch_edge_ids": [],
+            },
+            "route_score_changes": [],
+        }
+        version = self._store.create_graph_version(
+            workspace_id=workspace_id,
+            trigger_type="confirm_candidate",
+            change_summary=f"confirm candidate {candidate_id}",
+            diff_payload=diff_payload,
+            request_id=request_id,
+            conn=conn,
+        )
+        active_nodes = self._list_active_nodes(workspace_id, conn=conn)
+        active_edges = self._list_active_edges(workspace_id, conn=conn)
+        self._store.upsert_graph_workspace(
+            workspace_id=workspace_id,
+            latest_version_id=str(version["version_id"]),
+            status="ready",
+            node_count=len(active_nodes),
+            edge_count=len(active_edges),
+            conn=conn,
+        )
+        self._store.emit_event(
+            event_name="graph_materialization_completed",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            source_id=source_id,
+            candidate_batch_id=candidate.get("candidate_batch_id"),
+            component="candidate_confirmation_service",
+            step="graph_materialization",
+            status="completed",
+            refs={
+                "candidate_id": candidate_id,
+                "node_id": str(node["node_id"]),
+                "edge_ids": edge_ids,
+                "version_id": version["version_id"],
+                "result_ref": {
+                    "resource_type": "graph_version",
+                    "resource_id": version["version_id"],
+                },
+            },
+            metrics={
+                "node_count": len(active_nodes),
+                "edge_count": len(active_edges),
+            },
+            conn=conn,
+        )
+        self._store.emit_event(
+            event_name="graph_version_created",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            source_id=source_id,
+            candidate_batch_id=candidate.get("candidate_batch_id"),
+            component="candidate_confirmation_service",
+            step="version_create",
+            status="completed",
+            refs={
+                "candidate_id": candidate_id,
+                "version_id": version["version_id"],
+                "result_ref": {
+                    "resource_type": "graph_version",
+                    "resource_id": version["version_id"],
+                },
+            },
+            conn=conn,
+        )
+        return {
+            "graph_node_id": str(node["node_id"]),
+            "graph_edge_ids": edge_ids,
+            "graph_version_id": str(version["version_id"]),
+            "node_count": len(active_nodes),
+            "edge_count": len(active_edges),
+        }
+
+    def _load_candidate(self, *, workspace_id: str, candidate_id: str) -> dict[str, object]:
+        candidate = self._store.get_candidate(candidate_id)
+        if candidate is None:
+            raise CandidateConfirmationError(
+                status_code=404,
+                error_code="research.not_found",
+                message="candidate not found",
+                details={"candidate_id": candidate_id},
+            )
+        if candidate["workspace_id"] != workspace_id:
+            raise CandidateConfirmationError(
+                status_code=409,
+                error_code="research.conflict",
+                message="workspace_id does not match candidate ownership",
+                details={"candidate_id": candidate_id},
+            )
+        return candidate
+
+    def _ensure_pending(self, *, candidate: dict[str, object], action: str) -> None:
+        if candidate["status"] != "pending":
+            raise CandidateConfirmationError(
+                status_code=409,
+                error_code="research.invalid_state",
+                message=f"candidate cannot be {action}ed in current status",
+                details={"candidate_id": candidate["candidate_id"], "status": candidate["status"]},
+            )
+
+    def confirm(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        candidate = self._load_candidate(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+        )
+        self._ensure_pending(candidate=candidate, action="confirm")
+
+        normalized_text = normalize_candidate_text(str(candidate["text"]))
+        conflict = self._store.find_confirmed_object_by_normalized_text(
+            workspace_id=workspace_id,
+            normalized_text=normalized_text,
+        )
+        if conflict is not None:
+            reason = (
+                "duplicate_confirmed_object"
+                if conflict["object_type"] == candidate["candidate_type"]
+                else "cross_type_confirmed_conflict"
+            )
+            error = CandidateConfirmationError(
+                status_code=409,
+                error_code="research.conflict",
+                message="candidate confirmation conflicts with existing confirmed object",
+                details={
+                    "candidate_id": candidate_id,
+                    "reason": reason,
+                    "conflict_object_type": conflict["object_type"],
+                    "conflict_object_id": conflict["object_id"],
+                },
+            )
+            self._store.emit_event(
+                event_name="candidate_confirmation_failed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                source_id=str(candidate["source_id"]),
+                candidate_batch_id=candidate.get("candidate_batch_id"),
+                component="candidate_confirmation_service",
+                step="confirm",
+                status="failed",
+                refs={
+                    "candidate_id": candidate_id,
+                    "conflict_object_id": conflict["object_id"],
+                    "conflict_object_type": conflict["object_type"],
+                },
+                error={
+                    "error_code": error.error_code,
+                    "message": error.message,
+                    "details": error.details,
+                },
+            )
+            raise error
+
+        formal_object: dict[str, str] | None = None
+        try:
+            def _confirm_txn(
+                conn: sqlite3.Connection,
+            ) -> tuple[dict[str, str], dict[str, object]]:
+                nonlocal formal_object
+                formal_object = self._store.create_confirmed_object_from_candidate(
+                    candidate=candidate,
+                    normalized_text=normalized_text,
+                    request_id=request_id,
+                    conn=conn,
+                )
+                self._scholarly_source_service.persist_evidence_refs_for_confirmation(
+                    candidate=candidate,
+                    object_type=str(formal_object["object_type"]),
+                    object_id=str(formal_object["object_id"]),
+                    request_id=request_id,
+                    conn=conn,
+                )
+                self._store.update_candidate_status(
+                    candidate_id=candidate_id,
+                    status="confirmed",
+                    conn=conn,
+                )
+                self._store.emit_event(
+                    event_name="candidate_confirmed",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=str(candidate["source_id"]),
+                    candidate_batch_id=candidate.get("candidate_batch_id"),
+                    component="candidate_confirmation_service",
+                    step="confirm",
+                    status="completed",
+                    refs={
+                        "candidate_id": candidate_id,
+                        "formal_object_type": formal_object["object_type"],
+                        "formal_object_id": formal_object["object_id"],
+                        "source_id": candidate["source_id"],
+                        "extraction_job_id": candidate.get("extraction_job_id"),
+                    },
+                    conn=conn,
+                )
+                graph_result = self._materialize_graph_version_for_confirmation(
+                    candidate=candidate,
+                    formal_object=formal_object,
+                    request_id=request_id,
+                    conn=conn,
+                )
+                return formal_object, graph_result
+
+            formal_object, graph_result = self._store.run_in_transaction(_confirm_txn)
+        except CandidateConfirmationError:
+            raise
+        except Exception as exc:
+            error = CandidateConfirmationError(
+                status_code=409,
+                error_code="research.version_diff_unavailable",
+                message="graph/version persistence failed during candidate confirmation",
+                details={
+                    "candidate_id": candidate_id,
+                    "reason": str(exc),
+                },
+            )
+            self._store.emit_event(
+                event_name="candidate_confirmation_failed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                source_id=str(candidate["source_id"]),
+                candidate_batch_id=candidate.get("candidate_batch_id"),
+                component="candidate_confirmation_service",
+                step="graph_materialization",
+                status="failed",
+                refs={
+                    "candidate_id": candidate_id,
+                    "formal_object_type": (
+                        formal_object["object_type"] if formal_object is not None else None
+                    ),
+                    "formal_object_id": (
+                        formal_object["object_id"] if formal_object is not None else None
+                    ),
+                },
+                error={
+                    "error_code": error.error_code,
+                    "message": error.message,
+                    "details": error.details,
+                },
+            )
+            raise error
+        assert formal_object is not None
+        return {
+            "candidate_id": candidate_id,
+            "candidate_status": "confirmed",
+            "formal_object_type": formal_object["object_type"],
+            "formal_object_id": formal_object["object_id"],
+            "graph_node_id": graph_result["graph_node_id"],
+            "graph_edge_ids": graph_result["graph_edge_ids"],
+            "graph_version_id": graph_result["graph_version_id"],
+        }
+
+    def reject(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        reason: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        candidate = self._load_candidate(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+        )
+        self._ensure_pending(candidate=candidate, action="reject")
+
+        self._store.update_candidate_status(
+            candidate_id=candidate_id,
+            status="rejected",
+            reject_reason=reason,
+        )
+        self._store.emit_event(
+            event_name="candidate_rejected",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            source_id=str(candidate["source_id"]),
+            candidate_batch_id=candidate.get("candidate_batch_id"),
+            component="candidate_confirmation_service",
+            step="reject",
+            status="completed",
+            refs={
+                "candidate_id": candidate_id,
+                "reason": reason,
+                "source_id": candidate["source_id"],
+                "extraction_job_id": candidate.get("extraction_job_id"),
+            },
+        )
+        return {
+            "candidate_id": candidate_id,
+            "candidate_status": "rejected",
+        }

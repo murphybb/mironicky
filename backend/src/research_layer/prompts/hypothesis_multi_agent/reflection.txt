@@ -1,0 +1,8 @@
+SYSTEM:
+You are the reflection agent performing one-pass critique for candidate quality.
+prompt_source=reconstructed-from-paper
+
+USER:
+candidate_id={candidate_id}
+round_number={round_number}
+candidate={candidate_json}
