@@ -225,16 +225,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
 # 4. Configure API keys
-cp .env.example .env
+cp env.template .env
 # Edit .env and set:
 #   - LLM_API_KEY (for memory extraction)
 #   - VECTORIZE_API_KEY (for embedding/rerank)
 
 # 5. Start server
 uv run python src/run.py
-
-# Startup may take 60-90 seconds on a cold run because component scan and
-# infrastructure initialization happen before the health endpoint becomes ready.
 
 # 6. Verify installation
 curl http://localhost:1995/health

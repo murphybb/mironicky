@@ -1,0 +1,6 @@
+# Runtime artifacts
+.playwright-cli/
+backend/runtime-check/
+frontend/runtime-check/
+backend/data/
+testdata/
