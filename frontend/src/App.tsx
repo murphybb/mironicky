@@ -47,6 +47,8 @@ import {
 const DEFAULT_WORKSPACE_ID = 'ws-default-1';
 const WORKSPACE_STORAGE_KEY = 'mironicky.workspace_id';
 const MOBILE_BREAKPOINT = 900;
+const TOPBAR_ASYNC_POLL_TIMEOUT_MS = 120000;
+const TOPBAR_ASYNC_POLL_INTERVAL_MS = 1200;
 
 interface ExtractionContext {
   sourceId: string;
@@ -768,7 +770,11 @@ export default function App() {
       );
       if (acceptedJobId) {
         try {
-          const completed = await pollJob(acceptedJobId, 5000, 1000);
+          const completed = await pollJob(
+            acceptedJobId,
+            TOPBAR_ASYNC_POLL_TIMEOUT_MS,
+            TOPBAR_ASYNC_POLL_INTERVAL_MS
+          );
           await fetchData();
           setRecentAsyncTask(
             createRecentTask('hypothesis', 'completed', '假设已生成，可前往路线详情查看结果。', {
@@ -860,7 +866,11 @@ export default function App() {
           );
           if (lastAcceptedJobId) {
             try {
-              const completed = await pollJob(lastAcceptedJobId, 5000, 1000);
+              const completed = await pollJob(
+                lastAcceptedJobId,
+                TOPBAR_ASYNC_POLL_TIMEOUT_MS,
+                TOPBAR_ASYNC_POLL_INTERVAL_MS
+              );
               await fetchData();
               setRecentAsyncTask(
                 createRecentTask('route', 'completed', '路线已生成，可前往研究路线查看结果。', {
@@ -971,8 +981,34 @@ export default function App() {
           return;
         }
         const job = await generateHypothesis(workspaceId, [triggerId]);
-        if (job?.job_id) {
-          await pollJob(job.job_id, 45000, 1200);
+        const submittedAt = new Date().toISOString();
+        const acceptedJobId = String(job?.job_id || '').trim() || null;
+        if (acceptedJobId) {
+          setRecentAsyncTask(
+            createRecentTask('hypothesis', 'running', '假设任务已提交，正在等待后端完成。', {
+              submittedAt,
+              jobId: acceptedJobId,
+            })
+          );
+          try {
+            await pollJob(
+              acceptedJobId,
+              TOPBAR_ASYNC_POLL_TIMEOUT_MS,
+              TOPBAR_ASYNC_POLL_INTERVAL_MS
+            );
+          } catch (error) {
+            if (isJobTimeoutError(error)) {
+              setRecentAsyncTask(
+                createRecentTask('hypothesis', 'running_background', '前端轮询已超时，任务可能仍在后台处理中。', {
+                  submittedAt,
+                  jobId: acceptedJobId,
+                })
+              );
+              showToast(`假设任务已提交（job ${acceptedJobId}），当前仍在后台处理中`);
+              return;
+            }
+            throw error;
+          }
         }
         const hypothesesResp = await listHypotheses(workspaceId);
         hypothesisId = hypothesesResp.items?.[0]?.hypothesis_id;
@@ -1275,8 +1311,6 @@ export default function App() {
     </div>
   );
 }
-
-
 
 
 
