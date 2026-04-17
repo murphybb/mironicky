@@ -1178,7 +1178,7 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
       ? '抽取已完成，可以继续确认候选并入图。'
       : '等待任务状态同步。';
 
-  const pending = scopedCandidates.filter((c: any) => c.status === 'pending');
+  const pending = useMemo(() => scopedCandidates.filter((c: any) => c.status === 'pending'), [scopedCandidates]);
   const pendingIds = useMemo(() => pending.map((item: any) => String(item.candidate_id)), [pending]);
   const selectedPendingIds = useMemo(
     () => selectedIds.filter((id) => pendingIds.includes(String(id))),
@@ -1186,7 +1186,13 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
   );
 
   useEffect(() => {
-    setSelectedIds((prev) => prev.filter((id) => pendingIds.includes(String(id))));
+    setSelectedIds((prev) => {
+      const next = prev.filter((id) => pendingIds.includes(String(id)));
+      if (next.length === prev.length && next.every((id, index) => id === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
   }, [pendingIds]);
   const parseSummary = useMemo(() => {
     const byType = scopedCandidates.reduce((acc: Record<string, number>, item: any) => {
@@ -1211,18 +1217,78 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
     };
   }, [scopedCandidates]);
 
+  const isDuplicateConfirmedConflict = (error: any) => {
+    const status = Number(error?.status || 0);
+    const errorCode = String(error?.envelope?.error_code || error?.error_code || '').toLowerCase();
+    const reason = String(error?.envelope?.details?.reason || error?.details?.reason || '').toLowerCase();
+    return status === 409 && errorCode === 'research.conflict' && reason === 'duplicate_confirmed_object';
+  };
+
+  const isConfirmInvalidState = (error: any) => {
+    const status = Number(error?.status || 0);
+    const errorCode = String(error?.envelope?.error_code || error?.error_code || '').toLowerCase();
+    return status === 409 && errorCode === 'research.invalid_state';
+  };
+
+  const confirmCandidatesWithConflictTolerance = async (candidateIds: string[]) => {
+    if (!Array.isArray(candidateIds) || candidateIds.length === 0) {
+      return { confirmedIds: [] as string[], skippedConflictIds: [] as string[], alreadyHandledIds: [] as string[] };
+    }
+    try {
+      await confirmCandidates(workspaceId, candidateIds);
+      return { confirmedIds: candidateIds, skippedConflictIds: [] as string[], alreadyHandledIds: [] as string[] };
+    } catch (error) {
+      if (!isDuplicateConfirmedConflict(error) && !isConfirmInvalidState(error)) throw error;
+    }
+
+    const confirmedIds: string[] = [];
+    const skippedConflictIds: string[] = [];
+    const alreadyHandledIds: string[] = [];
+    for (const candidateId of candidateIds) {
+      try {
+        await confirmCandidates(workspaceId, [candidateId]);
+        confirmedIds.push(candidateId);
+      } catch (error) {
+        if (isDuplicateConfirmedConflict(error)) {
+          skippedConflictIds.push(candidateId);
+          try {
+            await rejectCandidates(workspaceId, [candidateId], '重复确认自动跳过');
+          } catch {
+            // 自动跳过失败时不影响同批其他候选继续处理。
+          }
+          continue;
+        }
+        if (isConfirmInvalidState(error)) {
+          alreadyHandledIds.push(candidateId);
+          continue;
+        }
+        throw error;
+      }
+    }
+    return { confirmedIds, skippedConflictIds, alreadyHandledIds };
+  };
+
   const handleAction = async (id: string, action: string) => {
     try {
       const targetCandidate = scopedCandidates.find((item: any) => String(item.candidate_id) === String(id));
       if (action === 'acc') {
-        await confirmCandidates(workspaceId, [id]);
-        if (targetCandidate) {
+        const { confirmedIds, skippedConflictIds, alreadyHandledIds } = await confirmCandidatesWithConflictTolerance([id]);
+        if (targetCandidate && confirmedIds.length > 0) {
           await hydrateConfirmedCandidatesToGraph(workspaceId, [{ ...targetCandidate, status: 'confirmed' }]);
+        }
+        await fetchData();
+        if (skippedConflictIds.length > 0) {
+          showToast('候选与已确认对象重复，已自动跳过并标记为拒绝');
+          return;
+        }
+        if (alreadyHandledIds.length > 0) {
+          showToast('候选状态已变化，已自动刷新最新状态');
+          return;
         }
       } else {
         await rejectCandidates(workspaceId, [id], '用户拒绝');
+        await fetchData();
       }
-      await fetchData();
       showToast(action === 'acc' ? '节点已确认入图' : '节点已拒绝');
     } catch (error) {
       showToast(getErrorMessage(error));
@@ -1238,17 +1304,27 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
       }
 
       if (action === 'acc') {
-        await confirmCandidates(workspaceId, pendingIds);
-        await hydrateConfirmedCandidatesToGraph(
-          workspaceId,
-          pending.map((item: any) => ({ ...item, status: 'confirmed' }))
-        );
+        const { confirmedIds, skippedConflictIds, alreadyHandledIds } = await confirmCandidatesWithConflictTolerance(pendingIds);
+        if (confirmedIds.length > 0) {
+          const confirmedPendingCandidates = pending
+            .filter((item: any) => confirmedIds.includes(String(item.candidate_id)))
+            .map((item: any) => ({ ...item, status: 'confirmed' }));
+          await hydrateConfirmedCandidatesToGraph(workspaceId, confirmedPendingCandidates);
+        }
+        await fetchData();
+        if (skippedConflictIds.length > 0) {
+          showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条，跳过重复 ${skippedConflictIds.length} 条`);
+        } else if (alreadyHandledIds.length > 0) {
+          showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条`);
+        } else {
+          showToast('全部节点已确认入图');
+        }
+        if (confirmedIds.length > 0) goto('workbench');
       } else {
         await rejectCandidates(workspaceId, pendingIds, '用户全部拒绝');
+        await fetchData();
+        showToast('全部节点已拒绝');
       }
-      await fetchData();
-      showToast(action === 'acc' ? '全部节点已确认入图' : '全部节点已拒绝');
-      if (action === 'acc') goto('workbench');
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -1272,17 +1348,28 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
         return;
       }
       if (action === 'acc') {
-        await confirmCandidates(workspaceId, selectedPendingIds);
-        const selectedPendingCandidates = pending
-          .filter((item: any) => selectedPendingIds.includes(String(item.candidate_id)))
-          .map((item: any) => ({ ...item, status: 'confirmed' }));
-        await hydrateConfirmedCandidatesToGraph(workspaceId, selectedPendingCandidates);
+        const { confirmedIds, skippedConflictIds, alreadyHandledIds } = await confirmCandidatesWithConflictTolerance(selectedPendingIds);
+        if (confirmedIds.length > 0) {
+          const selectedPendingCandidates = pending
+            .filter((item: any) => confirmedIds.includes(String(item.candidate_id)))
+            .map((item: any) => ({ ...item, status: 'confirmed' }));
+          await hydrateConfirmedCandidatesToGraph(workspaceId, selectedPendingCandidates);
+        }
+        await fetchData();
+        setSelectedIds([]);
+        if (skippedConflictIds.length > 0) {
+          showToast(`已确认 ${confirmedIds.length} 条选中候选，已处理 ${alreadyHandledIds.length} 条，跳过重复 ${skippedConflictIds.length} 条`);
+        } else if (alreadyHandledIds.length > 0) {
+          showToast(`已确认 ${confirmedIds.length} 条选中候选，已处理 ${alreadyHandledIds.length} 条`);
+        } else {
+          showToast(`已确认 ${confirmedIds.length} 条选中候选`);
+        }
       } else {
         await rejectCandidates(workspaceId, selectedPendingIds, '用户批量拒绝选中候选');
+        setSelectedIds([]);
+        await fetchData();
+        showToast(`已拒绝 ${selectedPendingIds.length} 条选中候选`);
       }
-      setSelectedIds([]);
-      await fetchData();
-      showToast(action === 'acc' ? `已确认 ${selectedPendingIds.length} 条选中候选` : `已拒绝 ${selectedPendingIds.length} 条选中候选`);
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -1461,5 +1548,3 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
     </div>
   );
 }
-
-
