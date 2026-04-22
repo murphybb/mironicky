@@ -57,6 +57,7 @@ class HypothesisMultiAgentOrchestrator:
         related_object_ids: list[dict[str, str]],
         minimum_validation_action: dict[str, object],
         weakening_signal: dict[str, object],
+        orchestration_mode: str = "multi_agent_pool",
     ) -> dict[str, object]:
         supervisor_plan = self._supervisor.build_pool_plan(
             workspace_id=workspace_id,
@@ -83,7 +84,7 @@ class HypothesisMultiAgentOrchestrator:
                 "pool_id": pool_id,
                 "workspace_id": workspace_id,
                 "status": "running",
-                "orchestration_mode": "multi_agent_pool",
+                "orchestration_mode": orchestration_mode,
                 "trigger_refs": copy.deepcopy(trigger_refs),
                 "top_k": top_k,
                 "max_rounds": max_rounds,
@@ -141,7 +142,15 @@ class HypothesisMultiAgentOrchestrator:
     ) -> dict[str, object]:
         with self._lock:
             pool = self._require_pool(pool_id)
-            if str(pool["status"]) in {"finalized", "failed", "cancelled"}:
+            if str(pool["status"]) in {
+                "paused",
+                "stopping",
+                "stopped",
+                "finalizing",
+                "finalized",
+                "failed",
+                "cancelled",
+            }:
                 raise ValueError(f"pool {pool_id} is not runnable")
             round_number = int(pool["current_round_number"]) + 1
             round_id = self._store.gen_id("round")
@@ -296,6 +305,95 @@ class HypothesisMultiAgentOrchestrator:
             if pool is None:
                 return None
             return self._pool_public(pool)
+
+    def get_candidate(self, *, candidate_id: str) -> dict[str, object] | None:
+        with self._lock:
+            for pool_candidates in self._candidates.values():
+                candidate = pool_candidates.get(candidate_id)
+                if candidate is not None:
+                    return self._candidate_public(candidate)
+            return None
+
+    def control_pool(self, *, pool_id: str, request_id: str, action: str) -> dict[str, object]:
+        with self._lock:
+            pool = self._require_pool(pool_id)
+            status = str(pool.get("status") or "running")
+            if status in {"stopped", "finalized", "failed", "cancelled"}:
+                raise ValueError(f"pool {pool_id} is terminal")
+
+            reasoning_subgraph = pool.get("reasoning_subgraph", {})
+            if not isinstance(reasoning_subgraph, dict):
+                reasoning_subgraph = {}
+            control = reasoning_subgraph.get("control", {})
+            if not isinstance(control, dict):
+                control = {}
+
+            normalized_action = str(action).strip()
+            if normalized_action == "pause":
+                status = "paused"
+                control["pause_requested"] = True
+            elif normalized_action == "resume":
+                status = "running"
+                control["pause_requested"] = False
+            elif normalized_action == "stop":
+                status = "stopping"
+                control["stop_requested"] = True
+            elif normalized_action == "force_finalize":
+                status = "finalizing"
+                control["force_finalize_requested"] = True
+            elif normalized_action == "disable_retrieval":
+                control["disable_retrieval_requested"] = True
+            elif normalized_action == "add_sources":
+                control["add_sources_requested"] = True
+            else:
+                raise ValueError(f"unsupported control action: {normalized_action}")
+
+            control["last_action"] = normalized_action
+            control["last_request_id"] = request_id
+            reasoning_subgraph["control"] = control
+            pool["reasoning_subgraph"] = reasoning_subgraph
+            pool["status"] = status
+            pool["updated_at"] = self._store.now()
+            return self._pool_public(pool)
+
+    def patch_candidate_reasoning_chain(
+        self,
+        *,
+        candidate_id: str,
+        reasoning_chain: dict[str, object],
+        reset_review_state: bool,
+    ) -> dict[str, object] | None:
+        with self._lock:
+            candidate: dict[str, object] | None = None
+            for pool_candidates in self._candidates.values():
+                if candidate_id in pool_candidates:
+                    candidate = pool_candidates[candidate_id]
+                    break
+            if candidate is None:
+                return None
+
+            existing_chain = candidate.get("reasoning_chain", {})
+            if not isinstance(existing_chain, dict):
+                existing_chain = {}
+            next_chain = dict(existing_chain)
+            next_chain.update(reasoning_chain if isinstance(reasoning_chain, dict) else {})
+            if reset_review_state:
+                next_chain["review_status"] = "pending"
+                next_chain["review_history"] = []
+                next_chain["revise_count"] = 0
+            next_chain["edited_by_user"] = True
+            next_chain["edited_at"] = self._store.now().isoformat()
+
+            candidate["reasoning_chain"] = next_chain
+            candidate["status"] = "alive"
+            statement = str(next_chain.get("hypothesis_statement") or "").strip()
+            summary = str(next_chain.get("hypothesis_level_conclusion") or "").strip()
+            if statement:
+                candidate["statement"] = statement
+            if summary:
+                candidate["summary"] = summary
+            candidate["updated_at"] = self._store.now()
+            return self._candidate_public(candidate)
 
     def list_pool_candidates(self, *, pool_id: str) -> list[dict[str, object]]:
         with self._lock:

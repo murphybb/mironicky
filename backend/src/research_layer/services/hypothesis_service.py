@@ -101,6 +101,100 @@ class HypothesisService:
     def get_search_tree_node(self, *, tree_node_id: str) -> dict[str, object] | None:
         return self._multi_orchestrator.get_search_tree_node(tree_node_id=tree_node_id)
 
+    def get_candidate(self, *, candidate_id: str) -> dict[str, object] | None:
+        return self._multi_orchestrator.get_candidate(candidate_id=candidate_id)
+
+    async def control_pool(
+        self,
+        *,
+        pool_id: str,
+        workspace_id: str,
+        request_id: str,
+        action: str,
+        source_ids: list[str],
+    ) -> dict[str, object]:
+        del source_ids
+        pool = self._multi_orchestrator.get_pool(pool_id=pool_id)
+        if pool is None:
+            self._raise(
+                status_code=404,
+                error_code="research.not_found",
+                message="hypothesis pool not found",
+                details={"pool_id": pool_id},
+            )
+        if str(pool.get("workspace_id")) != workspace_id:
+            self._raise(
+                status_code=409,
+                error_code="research.conflict",
+                message="workspace_id does not match pool ownership",
+                details={"pool_id": pool_id},
+            )
+        try:
+            updated = self._multi_orchestrator.control_pool(
+                pool_id=pool_id,
+                request_id=request_id,
+                action=action,
+            )
+        except ValueError as exc:
+            self._raise(
+                status_code=409,
+                error_code="research.invalid_state",
+                message="pool control action failed",
+                details={"pool_id": pool_id, "action": action, "reason": str(exc)},
+            )
+        return updated
+
+    def patch_candidate_reasoning_chain(
+        self,
+        *,
+        candidate_id: str,
+        workspace_id: str,
+        request_id: str,
+        reasoning_chain: dict[str, object],
+        reset_review_state: bool = True,
+    ) -> dict[str, object]:
+        existing = self._multi_orchestrator.get_candidate(candidate_id=candidate_id)
+        if existing is None:
+            self._raise(
+                status_code=404,
+                error_code="research.not_found",
+                message="hypothesis candidate not found",
+                details={"candidate_id": candidate_id},
+            )
+        if str(existing.get("workspace_id")) != workspace_id:
+            self._raise(
+                status_code=409,
+                error_code="research.conflict",
+                message="workspace_id does not match candidate ownership",
+                details={"candidate_id": candidate_id},
+            )
+        candidate = self._multi_orchestrator.patch_candidate_reasoning_chain(
+            candidate_id=candidate_id,
+            reasoning_chain=reasoning_chain,
+            reset_review_state=reset_review_state,
+        )
+        if candidate is None:
+            self._raise(
+                status_code=404,
+                error_code="research.not_found",
+                message="hypothesis candidate not found",
+                details={"candidate_id": candidate_id},
+            )
+        self._store.emit_event(
+            event_name="hypothesis_candidate_reasoning_chain_patched",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            component="hypothesis_service",
+            step="candidate_patch",
+            status="completed",
+            refs={
+                "pool_id": str(candidate.get("pool_id") or ""),
+                "candidate_id": candidate_id,
+            },
+        )
+        return candidate
+
     async def generate_multi_agent_pool(
         self,
         *,
@@ -186,6 +280,98 @@ class HypothesisService:
                 "top_k": top_k,
                 "max_rounds": max_rounds,
                 "candidate_count": candidate_count,
+            },
+        )
+        return pool
+
+    async def generate_literature_frontier_pool(
+        self,
+        *,
+        workspace_id: str,
+        source_ids: list[str],
+        request_id: str,
+        generation_job_id: str | None,
+        research_goal: str,
+        frontier_size: int,
+        max_rounds: int,
+        constraints: dict[str, object],
+        preference_profile: dict[str, object],
+        active_retrieval: dict[str, object],
+    ) -> dict[str, object]:
+        canonical_source_ids = [
+            source_id.strip() for source_id in source_ids if source_id.strip()
+        ]
+        if not canonical_source_ids:
+            self._raise(
+                status_code=400,
+                error_code="research.invalid_request",
+                message="source_ids must not be empty",
+            )
+        trigger_refs = self._build_literature_trigger_refs(
+            workspace_id=workspace_id,
+            source_ids=canonical_source_ids,
+        )
+        if not trigger_refs:
+            self._raise(
+                status_code=409,
+                error_code="research.invalid_state",
+                message="literature_frontier requires confirmed source candidates",
+                details={"source_ids": canonical_source_ids},
+            )
+        related_object_ids = [
+            {"object_type": "source", "object_id": source_id}
+            for source_id in canonical_source_ids
+        ]
+        minimum_validation_action = self._build_minimum_validation_action(
+            workspace_id=workspace_id,
+            triggers=trigger_refs,
+            novelty_typing="literature_frontier",
+        )
+        weakening_signal = self._build_weakening_signal(triggers=trigger_refs)
+        try:
+            pool = await self._multi_orchestrator.create_pool(
+                workspace_id=workspace_id,
+                request_id=request_id,
+                trigger_refs=trigger_refs,
+                research_goal=research_goal,
+                top_k=frontier_size,
+                max_rounds=max_rounds,
+                candidate_count=max(6, frontier_size * 2),
+                constraints=constraints,
+                preference_profile={
+                    **preference_profile,
+                    "active_retrieval": dict(active_retrieval),
+                },
+                novelty_typing="literature_frontier",
+                related_object_ids=related_object_ids,
+                minimum_validation_action=minimum_validation_action,
+                weakening_signal=weakening_signal,
+                orchestration_mode="literature_frontier",
+            )
+        except ValueError as exc:
+            self._raise(
+                status_code=409,
+                error_code="research.invalid_state",
+                message="literature frontier pool creation failed",
+                details={"reason": str(exc)},
+            )
+        self._store.emit_event(
+            event_name="hypothesis_pool_created",
+            request_id=request_id,
+            job_id=generation_job_id,
+            workspace_id=workspace_id,
+            component="hypothesis_service",
+            step="literature_frontier_pool_create",
+            status="completed",
+            refs={
+                "pool_id": pool["pool_id"],
+                "source_ids": canonical_source_ids,
+                "orchestration_mode": pool["orchestration_mode"],
+            },
+            metrics={
+                "frontier_size": frontier_size,
+                "max_rounds": max_rounds,
+                "trigger_ref_count": len(trigger_refs),
             },
         )
         return pool
@@ -1167,6 +1353,63 @@ class HypothesisService:
             "cost_level": cost_level,
             "time_level": time_level,
         }
+
+    def _build_literature_trigger_refs(
+        self, *, workspace_id: str, source_ids: list[str]
+    ) -> list[dict[str, object]]:
+        triggers: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for source_id in source_ids:
+            source = self._store.get_source(source_id)
+            if source is None or str(source.get("workspace_id")) != workspace_id:
+                continue
+            confirmed = [
+                item
+                for item in self._store.list_candidates(
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    candidate_type=None,
+                    status="confirmed",
+                )
+            ]
+            if not confirmed:
+                continue
+            sample = confirmed[:5]
+            summary = "; ".join(str(item.get("text", "")).strip() for item in sample)
+            trigger_id = f"literature_frontier:{source_id}"
+            if trigger_id in seen:
+                continue
+            seen.add(trigger_id)
+            triggers.append(
+                {
+                    "trigger_id": trigger_id,
+                    "trigger_type": "weak_support",
+                    "workspace_id": workspace_id,
+                    "object_ref_type": "source",
+                    "object_ref_id": source_id,
+                    "summary": summary[:500]
+                    or f"Confirmed literature candidates from source {source_id}.",
+                    "trace_refs": {
+                        "source_id": source_id,
+                        "candidate_ids": [
+                            str(item.get("candidate_id", "")) for item in sample
+                        ],
+                    },
+                    "related_object_ids": [
+                        {"object_type": "source", "object_id": source_id},
+                        *[
+                            {
+                                "object_type": str(item.get("candidate_type", "candidate")),
+                                "object_id": str(item.get("candidate_id", "")),
+                            }
+                            for item in sample
+                            if str(item.get("candidate_id", "")).strip()
+                        ],
+                    ],
+                    "metrics": {"confirmed_candidate_count": len(confirmed)},
+                }
+            )
+        return triggers
 
     def _build_weakening_signal(
         self, *, triggers: list[dict[str, object]]

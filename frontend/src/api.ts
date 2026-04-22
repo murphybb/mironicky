@@ -1062,6 +1062,33 @@ export async function generateHypothesis(workspaceId: string, triggerIds: string
   });
 }
 
+export async function generateLiteratureFrontierHypothesis(payload: {
+  workspace_id: string;
+  source_ids: string[];
+  research_goal: string;
+  frontier_size?: number;
+  max_rounds?: number;
+  active_retrieval?: {
+    enabled?: boolean;
+    max_papers_per_burst?: number;
+    max_bursts?: number;
+  };
+}) {
+  return request<JobStatusResponse>(`/api/v1/research/hypotheses/generate`, {
+    method: 'POST',
+    body: {
+      workspace_id: payload.workspace_id,
+      source_ids: payload.source_ids,
+      research_goal: payload.research_goal,
+      mode: 'literature_frontier',
+      async_mode: true,
+      ...(payload.frontier_size === undefined ? {} : { frontier_size: payload.frontier_size }),
+      ...(payload.max_rounds === undefined ? {} : { max_rounds: payload.max_rounds }),
+      ...(payload.active_retrieval === undefined ? {} : { active_retrieval: payload.active_retrieval }),
+    },
+  });
+}
+
 export async function decideHypothesis(
   hypothesisId: string,
   action: 'promote' | 'reject' | 'defer',
@@ -1125,6 +1152,42 @@ export async function finalizeHypothesisPool(
     body: {
       workspace_id: payload.workspace_id,
       ...(payload.async_mode === undefined ? {} : { async_mode: payload.async_mode }),
+    },
+  });
+}
+
+export async function controlHypothesisPool(
+  poolId: string,
+  payload: {
+    workspace_id: string;
+    action: 'pause' | 'resume' | 'stop' | 'force_finalize' | 'disable_retrieval' | 'add_sources';
+    source_ids?: string[];
+  }
+) {
+  return request<any>(`/api/v1/research/hypotheses/pools/${encodeURIComponent(poolId)}/control`, {
+    method: 'POST',
+    body: {
+      workspace_id: payload.workspace_id,
+      action: payload.action,
+      ...(payload.source_ids === undefined ? {} : { source_ids: payload.source_ids }),
+    },
+  });
+}
+
+export async function patchHypothesisCandidate(
+  candidateId: string,
+  payload: {
+    workspace_id: string;
+    reasoning_chain: Record<string, unknown>;
+    reset_review_state?: boolean;
+  }
+) {
+  return request<any>(`/api/v1/research/hypotheses/candidates/${encodeURIComponent(candidateId)}`, {
+    method: 'PATCH',
+    body: {
+      workspace_id: payload.workspace_id,
+      reasoning_chain: payload.reasoning_chain,
+      ...(payload.reset_review_state === undefined ? {} : { reset_review_state: payload.reset_review_state }),
     },
   });
 }

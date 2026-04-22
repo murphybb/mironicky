@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import os
 import re
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from research_layer.services.research_llm_dependencies import (
     resolve_research_backend_and_model,
 )
 from research_layer.services.relation_extraction_service import RelationExtractionService
+from research_layer.services.source_chunking_service import SourceChunk, SourceChunkingService
 from research_layer.services.source_parser import ParseFailureError, ParsedSource, SourceParser
 
 _EXTRACTION_FALLBACK_ALLOWED_ERRORS = {
@@ -39,6 +41,9 @@ _DEFAULT_EXTRACTION_MAX_INPUT_CHARS = 120000
 _DEFAULT_EXTRACTION_MAX_INPUT_SEGMENTS = 400
 _DEFAULT_EXTRACTION_MAX_OUTPUT_TOKENS = 12000
 _DEFAULT_EXTRACTION_LLM_TIMEOUT_SECONDS = 300
+_DEFAULT_DOCUMENT_READER_MAX_OUTPUT_TOKENS = 1800
+_DEFAULT_SOURCE_CHUNK_MAX_CHARS = 3600
+_DEFAULT_SOURCE_CHUNK_MAX_SEGMENTS = 24
 _MIN_EXTRACTION_CANDIDATE_COUNT = 3
 _MIN_EXTRACTION_TYPE_DIVERSITY = 2
 _MAX_CANDIDATE_TEXT_CHARS = 220
@@ -91,6 +96,16 @@ class ExtractionWorker:
         self._store = store
         self._parser = SourceParser()
         self._gateway = build_research_llm_gateway()
+        self._chunking = SourceChunkingService(
+            max_chars=_read_positive_int_env(
+                "RESEARCH_SOURCE_CHUNK_MAX_CHARS",
+                _DEFAULT_SOURCE_CHUNK_MAX_CHARS,
+            ),
+            max_segments=_read_positive_int_env(
+                "RESEARCH_SOURCE_CHUNK_MAX_SEGMENTS",
+                _DEFAULT_SOURCE_CHUNK_MAX_SEGMENTS,
+            ),
+        )
         self._extractors = (
             EvidenceExtractor(),
             AssumptionExtractor(),
@@ -163,49 +178,50 @@ class ExtractionWorker:
             raw_relations: list[dict[str, object]] = []
 
             try:
-                prompt_chunk = self._build_prompt_chunk(parsed)
+                chunk_plan = self._chunking.plan(
+                    source_id=str(source["source_id"]), parsed=parsed
+                )
+                document_reading_memo = await self._build_document_reading_memo(
+                    request_id=request_id,
+                    parsed=parsed,
+                    failure_mode=failure_mode,
+                )
                 backend, model = resolve_research_backend_and_model()
-                units, latest_trace = await ArgumentUnitExtractionService(
-                    self._gateway
-                ).extract_units(
-                    request_id=request_id,
-                    workspace_id=workspace_id,
-                    source_id=str(source["source_id"]),
-                    source_title=str(source["title"]),
-                    source_type=str(source["source_type"]),
-                    chunk_id=f"chunk_{source['source_id']}",
-                    chunk_text=prompt_chunk,
-                    anchor_refs=self._build_anchor_refs(parsed),
-                    document_reading_memo="Rebuild explicit claim/evidence/premise/contradiction/open-question units.",
-                    max_tokens=self._resolve_output_max_tokens(),
-                    timeout_s=self._resolve_llm_timeout_seconds(),
-                    failure_mode=failure_mode,
-                    backend=backend,
-                    model=model,
-                )
-                raw_candidates.extend(
-                    self._map_argument_units_to_candidates(
-                        units=units,
-                        parsed=parsed,
-                        trace=latest_trace,
-                        request_id=request_id,
+                for chunk in chunk_plan.chunks:
+                    units, mapped_candidates, unit_trace = (
+                        await self._extract_argument_units_for_chunk(
+                            request_id=request_id,
+                            workspace_id=workspace_id,
+                            source=source,
+                            parsed=parsed,
+                            chunk=chunk,
+                            document_reading_memo=document_reading_memo,
+                            failure_mode=failure_mode,
+                            backend=backend,
+                            model=model,
+                        )
                     )
-                )
-                relations, latest_trace = await RelationExtractionService(
-                    self._gateway
-                ).rebuild_relations(
-                    request_id=request_id,
-                    workspace_id=workspace_id,
-                    source_id=str(source["source_id"]),
-                    units=units,
-                    chunk_text=prompt_chunk,
-                    max_tokens=self._resolve_output_max_tokens(),
-                    timeout_s=self._resolve_llm_timeout_seconds(),
-                    failure_mode=failure_mode,
-                    backend=backend,
-                    model=model,
-                )
-                raw_relations.extend(relations)
+                    raw_candidates.extend(mapped_candidates)
+                    if unit_trace is not None:
+                        latest_trace = unit_trace
+                    if not units:
+                        continue
+                    relations, relation_trace = await RelationExtractionService(
+                        self._gateway
+                    ).rebuild_relations(
+                        request_id=request_id,
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                        units=units,
+                        chunk_text=chunk.text,
+                        max_tokens=self._resolve_output_max_tokens(),
+                        timeout_s=self._resolve_llm_timeout_seconds(),
+                        failure_mode=failure_mode,
+                        backend=backend,
+                        model=model,
+                    )
+                    raw_relations.extend(relations)
+                    latest_trace = relation_trace
             except ResearchLLMError as exc:
                 if allow_fallback and exc.error_code in _EXTRACTION_FALLBACK_ALLOWED_ERRORS:
                     fallback_used = True
@@ -356,6 +372,8 @@ class ExtractionWorker:
                 metrics.update(trace_metrics)
             metrics["fallback_used"] = bool(metrics.get("fallback_used") or fallback_used)
             metrics["degraded"] = bool(metrics.get("degraded") or degraded)
+            if "chunk_plan" in locals():
+                metrics["chunk_count"] = len(chunk_plan.chunks)
             if degraded_reason:
                 metrics["degraded_reason"] = degraded_reason
             metrics["partial_failure_count"] = partial_failure_count
@@ -545,6 +563,77 @@ class ExtractionWorker:
             )
         return candidates
 
+    async def _extract_argument_units_for_chunk(
+        self,
+        *,
+        request_id: str,
+        workspace_id: str,
+        source: dict[str, object],
+        parsed: ParsedSource,
+        chunk: SourceChunk,
+        document_reading_memo: dict[str, object] | None,
+        failure_mode: str | None,
+        backend: str | None,
+        model: str | None,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], LLMCallResult | None]:
+        source_id = str(source["source_id"])
+        cache_key = "candidate:argument_unit_extractor"
+        cached = self._store.get_source_chunk_cache(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            chunk_hash=chunk.chunk_hash,
+            cache_key=cache_key,
+        )
+        if cached is not None:
+            payload = cached.get("payload", {})
+            units = payload.get("units", []) if isinstance(payload, dict) else []
+            candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
+            return (
+                [dict(item) for item in units if isinstance(item, dict)],
+                [dict(item) for item in candidates if isinstance(item, dict)],
+                None,
+            )
+
+        units, trace = await ArgumentUnitExtractionService(self._gateway).extract_units(
+            request_id=request_id,
+            workspace_id=workspace_id,
+            source_id=source_id,
+            source_title=str(source["title"]),
+            source_type=str(source["source_type"]),
+            chunk_id=chunk.chunk_id,
+            chunk_text=chunk.text,
+            anchor_refs=self._build_anchor_refs_for_chunk(parsed=parsed, chunk=chunk),
+            document_reading_memo=json.dumps(
+                document_reading_memo or {}, ensure_ascii=False
+            ),
+            max_tokens=self._resolve_output_max_tokens(),
+            timeout_s=self._resolve_llm_timeout_seconds(),
+            failure_mode=failure_mode,
+            backend=backend,
+            model=model,
+        )
+        mapped = self._map_argument_units_to_candidates(
+            units=units,
+            parsed=parsed,
+            trace=trace,
+            request_id=request_id,
+        )
+        for candidate in mapped:
+            trace_refs = candidate.get("trace_refs")
+            if not isinstance(trace_refs, dict):
+                trace_refs = {}
+                candidate["trace_refs"] = trace_refs
+            trace_refs["chunk_id"] = chunk.chunk_id
+            trace_refs["chunk_hash"] = chunk.chunk_hash
+        self._store.upsert_source_chunk_cache(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            chunk_hash=chunk.chunk_hash,
+            cache_key=cache_key,
+            payload={"units": units, "candidates": mapped},
+        )
+        return units, mapped, trace
+
     def _build_source_span(
         self,
         *,
@@ -570,6 +659,29 @@ class ExtractionWorker:
                     source_span["section_path"] = list(segment.section_path)
                 break
         return source_span
+
+    def _build_anchor_refs_for_chunk(
+        self, *, parsed: ParsedSource, chunk: SourceChunk
+    ) -> list[dict[str, object]]:
+        refs: list[dict[str, object]] = []
+        for segment in parsed.segments:
+            if int(segment.end) < chunk.start or int(segment.start) > chunk.end:
+                continue
+            ref: dict[str, object] = {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text[:240],
+            }
+            if segment.page is not None:
+                ref["page"] = segment.page
+            if segment.block_id:
+                ref["block_id"] = segment.block_id
+            if segment.paragraph_id:
+                ref["paragraph_id"] = segment.paragraph_id
+            refs.append(ref)
+            if len(refs) >= 100:
+                break
+        return refs
 
     def _build_anchor_refs(self, parsed: ParsedSource) -> list[dict[str, object]]:
         refs: list[dict[str, object]] = []
@@ -676,6 +788,71 @@ class ExtractionWorker:
                 }
             )
         return mapped, result
+
+    async def _build_document_reading_memo(
+        self,
+        *,
+        request_id: str,
+        parsed: ParsedSource,
+        failure_mode: str | None,
+    ) -> dict[str, object] | None:
+        prompt_template = load_prompt_template("document_reader_prompt.txt")
+        prompt = render_prompt_template(
+            prompt_template,
+            {"chunk_text": self._build_prompt_chunk(parsed)},
+        )
+        backend, model = resolve_research_backend_and_model()
+        result = await self._gateway.invoke_json(
+            request_id=request_id,
+            prompt_name="extraction_document_reader",
+            messages=build_messages_from_prompt(prompt),
+            backend=backend,
+            model=model,
+            max_tokens=min(
+                self._resolve_output_max_tokens(),
+                _DEFAULT_DOCUMENT_READER_MAX_OUTPUT_TOKENS,
+            ),
+            timeout_s=self._resolve_llm_timeout_seconds(),
+            allow_fallback=False,
+            expected_container="dict",
+            failure_mode=failure_mode,
+        )
+        payload = result.parsed_json if isinstance(result.parsed_json, dict) else {}
+        return self._normalize_document_reading_memo(payload) or None
+
+    def _normalize_document_reading_memo(
+        self, payload: dict[str, object]
+    ) -> dict[str, object]:
+        summary = str(payload.get("document_summary") or "").strip()
+        raw_hints = payload.get("candidate_hints")
+        hints = raw_hints if isinstance(raw_hints, dict) else {}
+        normalized_hints: dict[str, list[dict[str, str]]] = {}
+        for candidate_type in (
+            "evidence",
+            "assumption",
+            "conflict",
+            "failure",
+            "validation",
+        ):
+            raw_items = hints.get(candidate_type)
+            items: list[dict[str, str]] = []
+            if isinstance(raw_items, list):
+                for raw_item in raw_items[:4]:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    quote = str(raw_item.get("quote") or "").strip()
+                    reason = str(raw_item.get("reason") or "").strip()
+                    section = str(raw_item.get("section") or "").strip()
+                    if quote:
+                        item = {"quote": quote, "reason": reason}
+                        if section:
+                            item["section"] = section
+                        items.append(item)
+            normalized_hints[candidate_type] = items
+        return {
+            "document_summary": summary,
+            "candidate_hints": normalized_hints,
+        }
 
     def _resolve_backend_hint(self) -> str:
         return (

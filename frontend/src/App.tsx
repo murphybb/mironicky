@@ -1,7 +1,8 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { RoutesPage, RouteDetailPage, ImportPage, ConfirmPage } from './pages1';
 import { WorkbenchPage, FailuresPage, PackagesPage, TeamPage } from './pages2';
-import { Menu, X, Route, FileInput, Network, AlertTriangle, Package, Users } from 'lucide-react';
+import { FrontierPage } from './frontier';
+import { Menu, X, Route, FileInput, Network, AlertTriangle, Package, Users, Lightbulb } from 'lucide-react';
 import {
   RouteRecord,
   CandidateRecord,
@@ -105,7 +106,7 @@ function resolveInitialWorkspaceId() {
 function resolveInitialPage() {
   if (typeof window === 'undefined') return 'routes';
   const raw = new URLSearchParams(window.location.search).get('page');
-  const allowed = new Set(['routes', 'detail', 'import', 'confirm', 'workbench', 'failures', 'packages', 'team']);
+  const allowed = new Set(['routes', 'detail', 'import', 'confirm', 'workbench', 'frontier', 'failures', 'packages', 'team']);
   return raw && allowed.has(raw) ? raw : 'routes';
 }
 
@@ -1125,6 +1126,10 @@ export default function App() {
             <Network size={18} />
             {isSidebarOpen && <span>图谱工作台</span>}
           </button>
+          <button className={`nav-item ${currentPage === 'frontier' ? 'active' : ''}`} onClick={() => goto('frontier')} title="假设前沿">
+            <Lightbulb size={18} />
+            {isSidebarOpen && <span>假设前沿</span>}
+          </button>
           <button className={`nav-item ${currentPage === 'failures' ? 'active' : ''}`} onClick={() => goto('failures')} title="失败记录">
             <AlertTriangle size={18} />
             {isSidebarOpen && <span>失败记录</span>}
@@ -1305,6 +1310,18 @@ export default function App() {
         <div className={`page ${currentPage === 'workbench' ? 'active' : ''}`}>
           {currentPage === 'workbench' && <WorkbenchPage initialNodes={nodes} initialEdges={edges} edgeColors={edgeColors} goto={goto} showToast={showToast} workspaceId={workspaceId} onRefresh={fetchData} />}
         </div>
+        <div className={`page ${currentPage === 'frontier' ? 'active' : ''}`}>
+          {currentPage === 'frontier' && (
+            <FrontierPage
+              workspaceId={workspaceId}
+              sources={sources}
+              candidates={candidates}
+              showToast={showToast}
+              goto={goto}
+              onRefresh={fetchData}
+            />
+          )}
+        </div>
         <div className={`page ${currentPage === 'failures' ? 'active' : ''}`}>
           {currentPage === 'failures' && <FailuresPage failures={failures} selFail={selFail} setSelFail={setSelFail} goto={goto} showToast={showToast} workspaceId={workspaceId} onValidationSubmitted={fetchData} />}
         </div>
@@ -1343,6 +1360,4 @@ export default function App() {
     </div>
   );
 }
-
-
 

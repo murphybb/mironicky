@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   confirmCandidates,
+  controlHypothesisPool,
   extractSource,
   getGraph,
   getGraphDeepChains,
@@ -10,7 +11,9 @@ import {
   getGraphReport,
   getGraphSupportChains,
   importSource,
+  generateLiteratureFrontierHypothesis,
   listWorkspaces,
+  patchHypothesisCandidate,
 } from './api.ts';
 
 async function withMockFetch(handler: (url: string, init?: RequestInit) => unknown, run: () => Promise<void>) {
@@ -158,4 +161,77 @@ test('workspace list wrapper calls the backend workspace index', async () => {
   );
 
   assert.deepEqual(calls, ['/api/v1/research/workspaces']);
+});
+
+test('literature frontier wrapper uses hypothesis generate endpoint with source ids', async () => {
+  const calls: Array<{ url: string; body: any; method: string }> = [];
+
+  await withMockFetch(
+    (url, init) => {
+      calls.push({
+        url,
+        method: String(init?.method || 'GET'),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return {
+        job_id: 'job_frontier',
+        job_type: 'hypothesis_generate',
+        status: 'queued',
+        workspace_id: 'ws_frontier',
+      };
+    },
+    async () => {
+      const accepted = await generateLiteratureFrontierHypothesis({
+        workspace_id: 'ws_frontier',
+        source_ids: ['src_1'],
+        research_goal: 'Find a stronger causal explanation.',
+        frontier_size: 3,
+      });
+      assert.equal(accepted.job_id, 'job_frontier');
+    }
+  );
+
+  assert.deepEqual(
+    calls.map((call) => [call.method, call.url]),
+    [['POST', '/api/v1/research/hypotheses/generate']]
+  );
+  assert.equal(calls[0].body.mode, 'literature_frontier');
+  assert.deepEqual(calls[0].body.source_ids, ['src_1']);
+  assert.equal(calls[0].body.async_mode, true);
+});
+
+test('hypothesis pool control and candidate patch wrappers call backend endpoints', async () => {
+  const calls: Array<{ url: string; body: any; method: string }> = [];
+
+  await withMockFetch(
+    (url, init) => {
+      calls.push({
+        url,
+        method: String(init?.method || 'GET'),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return { ok: true };
+    },
+    async () => {
+      await controlHypothesisPool('pool_1', {
+        workspace_id: 'ws_frontier',
+        action: 'pause',
+      });
+      await patchHypothesisCandidate('candidate_1', {
+        workspace_id: 'ws_frontier',
+        reasoning_chain: { hypothesis_level_conclusion: 'new conclusion' },
+        reset_review_state: true,
+      });
+    }
+  );
+
+  assert.deepEqual(
+    calls.map((call) => [call.method, call.url]),
+    [
+      ['POST', '/api/v1/research/hypotheses/pools/pool_1/control'],
+      ['PATCH', '/api/v1/research/hypotheses/candidates/candidate_1'],
+    ]
+  );
+  assert.equal(calls[0].body.action, 'pause');
+  assert.equal(calls[1].body.reasoning_chain.hypothesis_level_conclusion, 'new conclusion');
 });

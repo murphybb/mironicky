@@ -2,18 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from research_layer.api.schemas.common import WorkspaceScopedBody
 
 HYPOTHESIS_STATUS_PATTERN = r"^(candidate|deferred|promoted_for_validation|rejected)$"
 HYPOTHESIS_POOL_STATUS_PATTERN = (
-    r"^(queued|running|stopped|finalized|failed|cancelled)$"
+    r"^(queued|running|paused|stopping|stopped|finalizing|finalized|failed|cancelled)$"
 )
 HYPOTHESIS_CANDIDATE_STATUS_PATTERN = r"^(alive|pruned|finalized|rejected)$"
 HYPOTHESIS_ROUND_STATUS_PATTERN = (
     r"^(running|completed|failed|cancelled)$"
 )
+
+
+class HypothesisActiveRetrievalConfig(BaseModel):
+    enabled: bool = True
+    max_papers_per_burst: int = Field(default=3, ge=1, le=10)
+    max_bursts: int = Field(default=2, ge=0, le=10)
 
 
 class HypothesisTriggerRecord(BaseModel):
@@ -39,15 +45,43 @@ class HypothesisListResponse(BaseModel):
 
 
 class HypothesisGenerateRequest(WorkspaceScopedBody):
-    trigger_ids: list[str] = Field(min_length=1)
+    trigger_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
     async_mode: bool = True
-    mode: str = Field(default="single_candidate", pattern=r"^(single_candidate|multi_agent_pool)$")
+    mode: str = Field(
+        default="single_candidate",
+        pattern=r"^(single_candidate|multi_agent_pool|literature_frontier)$",
+    )
     research_goal: str = ""
     top_k: int = Field(default=3, ge=1, le=10)
     max_rounds: int = Field(default=3, ge=1, le=20)
     candidate_count: int = Field(default=8, ge=2, le=30)
+    frontier_size: int = Field(default=3, ge=3, le=5)
+    active_retrieval: HypothesisActiveRetrievalConfig = Field(
+        default_factory=HypothesisActiveRetrievalConfig
+    )
     constraints: dict[str, object] = Field(default_factory=dict)
     preference_profile: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_mode_inputs(self) -> "HypothesisGenerateRequest":
+        if self.mode == "literature_frontier":
+            if not self.source_ids:
+                raise ValueError(
+                    "source_ids must not be empty when mode is literature_frontier"
+                )
+            if any(not str(source_id).strip() for source_id in self.source_ids):
+                raise ValueError(
+                    "source_ids must not contain blank entries when mode is literature_frontier"
+                )
+            if not str(self.research_goal).strip():
+                raise ValueError(
+                    "research_goal must not be empty when mode is literature_frontier"
+                )
+            return self
+        if not self.trigger_ids:
+            raise ValueError("trigger_ids must not be empty for trigger-driven modes")
+        return self
 
 
 class HypothesisPoolRoundRequest(WorkspaceScopedBody):
@@ -57,6 +91,18 @@ class HypothesisPoolRoundRequest(WorkspaceScopedBody):
 
 class HypothesisPoolFinalizeRequest(WorkspaceScopedBody):
     async_mode: bool = True
+
+
+class HypothesisPoolControlRequest(WorkspaceScopedBody):
+    action: str = Field(
+        pattern=r"^(pause|resume|stop|force_finalize|disable_retrieval|add_sources)$"
+    )
+    source_ids: list[str] = Field(default_factory=list)
+
+
+class HypothesisCandidatePatchRequest(WorkspaceScopedBody):
+    reasoning_chain: dict[str, object] = Field(default_factory=dict)
+    reset_review_state: bool = True
 
 
 class HypothesisDecisionRequest(WorkspaceScopedBody):
