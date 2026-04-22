@@ -20,6 +20,9 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 2;
 const PIN_KEY_PREFIX = 'mironicky.workbench.pinned.';
+const NODE_CARD_WIDTH = 250;
+const NODE_CARD_HEIGHT = 118;
+const NODE_CARD_GAP = 34;
 
 const CLUSTER_CENTERS: Record<string, Position> = {
   conclusion: { x: 520, y: 180 },
@@ -38,6 +41,25 @@ export function distance(left: Position, right: Position): number {
 export function clampZoom(currentScale: number, deltaY: number): number {
   const next = currentScale * (deltaY > 0 ? 0.88 : 1.12);
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(next.toFixed(3))));
+}
+
+export function getSelectionFocus(
+  selectedNodeId: string | null | undefined,
+  edges: LayoutEdge[]
+): { connectedNodeIds: Set<string>; connectedEdgeKeys: Set<string> } {
+  const connectedNodeIds = new Set<string>();
+  const connectedEdgeKeys = new Set<string>();
+  if (!selectedNodeId) return { connectedNodeIds, connectedEdgeKeys };
+
+  edges.forEach((edge, index) => {
+    const sourceId = String(edge.source_node_id || '');
+    const targetId = String(edge.target_node_id || '');
+    if (sourceId !== selectedNodeId && targetId !== selectedNodeId) return;
+    connectedEdgeKeys.add(`${sourceId}->${targetId}#${index}`);
+    connectedNodeIds.add(sourceId === selectedNodeId ? targetId : sourceId);
+  });
+  connectedNodeIds.delete(String(selectedNodeId));
+  return { connectedNodeIds, connectedEdgeKeys };
 }
 
 function normalizeType(rawType: unknown): string {
@@ -70,6 +92,56 @@ function seedByType(nodes: LayoutNode[], pinned: PositionMap): PositionMap {
     };
   });
   return positions;
+}
+
+function overlaps(left: Position, right: Position): boolean {
+  return !(
+    left.x + NODE_CARD_WIDTH + NODE_CARD_GAP <= right.x ||
+    right.x + NODE_CARD_WIDTH + NODE_CARD_GAP <= left.x ||
+    left.y + NODE_CARD_HEIGHT + NODE_CARD_GAP <= right.y ||
+    right.y + NODE_CARD_HEIGHT + NODE_CARD_GAP <= left.y
+  );
+}
+
+function isFree(candidate: Position, placed: Position[]): boolean {
+  return placed.every((position) => !overlaps(candidate, position));
+}
+
+function nearestFreePosition(desired: Position, placed: Position[], orderIndex: number): Position {
+  const base = { x: Math.max(32, desired.x), y: Math.max(32, desired.y) };
+  if (isFree(base, placed)) return base;
+
+  const angleCount = 18;
+  for (let radius = 90; radius <= 2200; radius += 46) {
+    for (let step = 0; step < angleCount; step += 1) {
+      const angle = ((step + orderIndex * 0.37) / angleCount) * Math.PI * 2;
+      const candidate = {
+        x: Math.max(32, base.x + Math.cos(angle) * radius),
+        y: Math.max(32, base.y + Math.sin(angle) * radius * 0.72),
+      };
+      if (isFree(candidate, placed)) return candidate;
+    }
+  }
+
+  return {
+    x: 32 + (orderIndex % 6) * (NODE_CARD_WIDTH + NODE_CARD_GAP),
+    y: 32 + Math.floor(orderIndex / 6) * (NODE_CARD_HEIGHT + NODE_CARD_GAP),
+  };
+}
+
+function preventCardOverlap(nodes: LayoutNode[], positions: PositionMap, pinnedIds: Set<string>): PositionMap {
+  const result: PositionMap = {};
+  const placed: Position[] = [];
+
+  nodes.forEach((node, index) => {
+    const nodeId = node.node_id;
+    const desired = positions[nodeId] || { x: 0, y: 0 };
+    const position = pinnedIds.has(nodeId) ? desired : nearestFreePosition(desired, placed, index);
+    result[nodeId] = position;
+    placed.push(position);
+  });
+
+  return result;
 }
 
 export function computeClusteredLayout(
@@ -120,10 +192,12 @@ export function computeClusteredLayout(
     }
   }
 
+  const separated = preventCardOverlap(nodes, positions, pinnedIds);
   for (const [nodeId, pinnedPosition] of Object.entries(pinned || {})) {
     if (positions[nodeId]) positions[nodeId] = { ...pinnedPosition };
+    if (separated[nodeId]) separated[nodeId] = { ...pinnedPosition };
   }
-  return positions;
+  return separated;
 }
 
 export function loadPinnedPositions(

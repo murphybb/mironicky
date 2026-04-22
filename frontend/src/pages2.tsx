@@ -20,6 +20,7 @@ import { normalizeGraphInspectorPayloads } from './graph-inspector-helpers';
 import {
   clampZoom,
   computeClusteredLayout,
+  getSelectionFocus,
   loadPinnedPositions,
   savePinnedPositions,
 } from './workbench-graph-layout';
@@ -533,6 +534,10 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   const hasActionableGraph = nodes.length > 1 && edges.length > 0;
   const canEnterEdgeMode = nodes.length >= 2;
   const canAutoLayout = nodes.length > 0;
+  const selectionFocus = useMemo(
+    () => getSelectionFocus(selNode?.node_id, edges),
+    [selNode?.node_id, edges]
+  );
   const pendingEdgeSourceNode = pendingEdgeSourceId
     ? nodes.find((node: any) => node.node_id === pendingEdgeSourceId)
     : null;
@@ -567,32 +572,48 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
                 const s = nodes.find((n: any) => n.node_id === e.source_node_id);
                 const t = nodes.find((n: any) => n.node_id === e.target_node_id);
                 if (!s || !t) return null;
+                const edgeKey = `${String(e.source_node_id || '')}->${String(e.target_node_id || '')}#${i}`;
+                const hasSelection = Boolean(selNode?.node_id);
+                const isFocusedEdge = selectionFocus.connectedEdgeKeys.has(edgeKey);
                 const x1 = s.x + 90;
                 const y1 = s.y + 60;
                 const x2 = t.x + 90;
                 const y2 = t.y;
                 const my = (y1 + y2) / 2;
                 return (
-                  <path key={i} d={`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`} fill="none" stroke={edgeColors[e.edge_type]} strokeWidth="2" strokeDasharray={e.edge_type === 'gaps' ? '4 4' : 'none'} />
+                  <path
+                    key={edgeKey}
+                    className={`edge-path ${isFocusedEdge ? 'edge-active' : ''} ${hasSelection && !isFocusedEdge ? 'edge-muted' : ''}`}
+                    d={`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`}
+                    fill="none"
+                    stroke={isFocusedEdge ? 'var(--accent-strong)' : edgeColors[e.edge_type]}
+                    strokeWidth={isFocusedEdge ? '4' : '2'}
+                    strokeDasharray={e.edge_type === 'gaps' ? '4 4' : 'none'}
+                  />
                 );
               })}
             </svg>
             <div className="wb-canvas" style={{ pointerEvents: 'auto' }}>
-              {nodes.map((n: any) => (
-                <div
-                  key={n.node_id}
-                  className={`graph-node gn-${n.node_type} ${selNode?.node_id === n.node_id ? 'sel' : ''} ${pendingEdgeSourceId === n.node_id ? 'sel' : ''}`}
-                  style={{ left: n.x, top: n.y }}
-                  onMouseDown={(event) => handleNodeMouseDown(event, n)}
-                  onClick={() => handleNodeClick(n)}
-                >
-                  <div className="gn-inner">
-                    <div className="gn-type">{getTypeLbl(n.node_type)}</div>
-                    <div className="gn-label">{n.short_label}</div>
-                    <div className="gn-tags">{n.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+              {nodes.map((n: any) => {
+                const isSelected = selNode?.node_id === n.node_id || pendingEdgeSourceId === n.node_id;
+                const hasSelection = Boolean(selNode?.node_id);
+                const isRelated = selectionFocus.connectedNodeIds.has(n.node_id);
+                return (
+                  <div
+                    key={n.node_id}
+                    className={`graph-node gn-${n.node_type} ${isSelected ? 'sel' : ''} ${isRelated ? 'related' : ''} ${hasSelection && !isSelected && !isRelated ? 'muted' : ''}`}
+                    style={{ left: n.x, top: n.y }}
+                    onMouseDown={(event) => handleNodeMouseDown(event, n)}
+                    onClick={() => handleNodeClick(n)}
+                  >
+                    <div className="gn-inner">
+                      <div className="gn-type">{getTypeLbl(n.node_type)}</div>
+                      <div className="gn-label">{n.short_label}</div>
+                      <div className="gn-tags">{n.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

@@ -60,6 +60,15 @@ def _import_playwright():
     return sync_playwright, expect, PlaywrightTimeoutError
 
 
+def _overlaps(left: dict[str, float], right: dict[str, float]) -> bool:
+    return not (
+        left["x"] + left["width"] <= right["x"]
+        or right["x"] + right["width"] <= left["x"]
+        or left["y"] + left["height"] <= right["y"]
+        or right["y"] + right["height"] <= left["y"]
+    )
+
+
 def main() -> int:
     args = _parse_args()
     pdf_path = _require_pdf(args.pdf)
@@ -91,10 +100,29 @@ def main() -> int:
             node_count = page.locator(".graph-node").count()
             if node_count < 1:
                 raise AssertionError("No graph nodes were rendered after candidate confirmation.")
+            node_boxes = [
+                (index, page.locator(".graph-node").nth(index).bounding_box())
+                for index in range(node_count)
+            ]
+            visible_boxes = [(index, box) for index, box in node_boxes if box is not None]
+            for left_index, left_box in visible_boxes:
+                for right_index, right_box in visible_boxes:
+                    if right_index <= left_index:
+                        continue
+                    if _overlaps(left_box, right_box):
+                        raise AssertionError(
+                            f"Graph nodes overlap after auto layout: {left_index} and {right_index}"
+                        )
 
             first_node.click(force=True)
             expect(page.locator(".wb-inspector")).to_contain_text("图谱洞察", timeout=30000)
             expect(page.locator(".insight-card")).to_have_count(4, timeout=30000)
+            if page.locator(".graph-node.sel").count() < 1:
+                raise AssertionError("Selected graph node did not receive the selected highlight.")
+            if page.locator(".graph-node.related").count() < 1:
+                raise AssertionError("Connected graph nodes did not receive related highlights.")
+            if page.locator(".edge-path.edge-active").count() < 1:
+                raise AssertionError("Connected graph edges did not receive active highlights.")
 
             zoom_before = page.locator(".zoom-hud").inner_text(timeout=10000)
             page.locator(".canvas-area").hover()
