@@ -431,6 +431,18 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS source_chunk_cache (
+                chunk_cache_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                chunk_hash TEXT NOT NULL,
+                cache_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS graph_versions (
                 version_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -448,6 +460,18 @@ class ResearchApiStateStore:
                 status TEXT NOT NULL,
                 node_count INTEGER NOT NULL,
                 edge_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS reasoning_chains (
+                reasoning_chain_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                chain_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """,
@@ -1067,6 +1091,8 @@ class ResearchApiStateStore:
             "research_conflicts",
             "research_failures",
             "research_validations",
+            "source_chunk_cache",
+            "reasoning_chains",
             "relation_candidates",
             "graph_nodes",
             "graph_edges",
@@ -1654,6 +1680,92 @@ class ResearchApiStateStore:
                 results.append(relation)
         return results
 
+    def get_source_chunk_cache(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        chunk_hash: str,
+        cache_key: str,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            """
+            SELECT *
+            FROM source_chunk_cache
+            WHERE workspace_id = ? AND source_id = ? AND chunk_hash = ? AND cache_key = ?
+            LIMIT 1
+            """,
+            (workspace_id, source_id, chunk_hash, cache_key),
+        )
+        if row is None:
+            return None
+        return {
+            "chunk_cache_id": row["chunk_cache_id"],
+            "workspace_id": row["workspace_id"],
+            "source_id": row["source_id"],
+            "chunk_hash": row["chunk_hash"],
+            "cache_key": row["cache_key"],
+            "payload": self._loads_dict(row["payload_json"]),
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
+        }
+
+    def upsert_source_chunk_cache(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        chunk_hash: str,
+        cache_key: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        existing = self.get_source_chunk_cache(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            chunk_hash=chunk_hash,
+            cache_key=cache_key,
+        )
+        now = self._to_iso(self.now())
+        if existing is None:
+            chunk_cache_id = self.gen_id("chunkcache")
+            self._execute(
+                """
+                INSERT INTO source_chunk_cache (
+                    chunk_cache_id, workspace_id, source_id, chunk_hash, cache_key,
+                    payload_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk_cache_id,
+                    workspace_id,
+                    source_id,
+                    chunk_hash,
+                    cache_key,
+                    self._dumps(payload),
+                    now,
+                    now,
+                ),
+            )
+        else:
+            chunk_cache_id = str(existing["chunk_cache_id"])
+            self._execute(
+                """
+                UPDATE source_chunk_cache
+                SET payload_json = ?, updated_at = ?
+                WHERE chunk_cache_id = ?
+                """,
+                (self._dumps(payload), now, chunk_cache_id),
+            )
+        record = self.get_source_chunk_cache(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            chunk_hash=chunk_hash,
+            cache_key=cache_key,
+        )
+        assert record is not None
+        return record
+
     def fail_candidate_batch(
         self, *, candidate_batch_id: str, error: dict[str, object]
     ) -> None:
@@ -1914,8 +2026,109 @@ class ResearchApiStateStore:
                 request_id,
             ),
             conn=conn,
-        )
+            )
         return {"object_type": candidate_type, "object_id": object_id}
+
+    def create_reasoning_chain(
+        self,
+        *,
+        workspace_id: str,
+        chain_type: str,
+        title: str,
+        payload: dict[str, object],
+        request_id: str | None = None,
+        status: str = "active",
+    ) -> dict[str, object]:
+        del request_id
+        chain_id = self.gen_id("chain")
+        now = self._to_iso(self.now())
+        self._execute(
+            """
+            INSERT INTO reasoning_chains (
+                reasoning_chain_id, workspace_id, chain_type, title, payload_json,
+                status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chain_id,
+                workspace_id,
+                chain_type,
+                title,
+                self._dumps(payload),
+                status,
+                now,
+                now,
+            ),
+        )
+        chain = self.get_reasoning_chain(chain_id)
+        assert chain is not None
+        return chain
+
+    def get_reasoning_chain(self, reasoning_chain_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM reasoning_chains WHERE reasoning_chain_id = ?",
+            (reasoning_chain_id,),
+        )
+        return self._row_to_reasoning_chain(row)
+
+    def list_reasoning_chains(
+        self, *, workspace_id: str, status: str | None = None
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM reasoning_chains WHERE workspace_id = ?"
+        params: list[object] = [workspace_id]
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at ASC, reasoning_chain_id ASC"
+        return [
+            chain
+            for row in self._fetchall(sql, tuple(params))
+            if (chain := self._row_to_reasoning_chain(row)) is not None
+        ]
+
+    def update_reasoning_chain(
+        self,
+        *,
+        reasoning_chain_id: str,
+        status: str | None = None,
+        payload: dict[str, object] | None = None,
+        title: str | None = None,
+    ) -> dict[str, object] | None:
+        current = self.get_reasoning_chain(reasoning_chain_id)
+        if current is None:
+            return None
+        self._execute(
+            """
+            UPDATE reasoning_chains
+            SET status = ?, payload_json = ?, title = ?, updated_at = ?
+            WHERE reasoning_chain_id = ?
+            """,
+            (
+                status if status is not None else current["status"],
+                self._dumps(payload if payload is not None else current["payload"]),
+                title if title is not None else current["title"],
+                self._to_iso(self.now()),
+                reasoning_chain_id,
+            ),
+        )
+        return self.get_reasoning_chain(reasoning_chain_id)
+
+    def _row_to_reasoning_chain(
+        self, row: sqlite3.Row | None
+    ) -> dict[str, object] | None:
+        if row is None:
+            return None
+        return {
+            "reasoning_chain_id": row["reasoning_chain_id"],
+            "workspace_id": row["workspace_id"],
+            "chain_type": row["chain_type"],
+            "title": row["title"],
+            "payload": self._loads_dict(row["payload_json"]),
+            "status": row["status"],
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
+        }
 
     def create_route(
         self,

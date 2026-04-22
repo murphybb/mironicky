@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import Query, Request
 
 from core.di.decorators import controller
-from core.interface.controller.base_controller import BaseController, get, post
+from core.interface.controller.base_controller import BaseController, get, patch, post
 from research_layer.api.controllers._job_runner import schedule_background_job
 from research_layer.api.controllers._state_store import STORE
 from research_layer.api.controllers._utils import (
@@ -19,11 +19,14 @@ from research_layer.api.schemas.common import (
     ResearchErrorCode,
 )
 from research_layer.api.schemas.hypothesis import (
+    HypothesisCandidatePatchRequest,
     HypothesisCandidateListResponse,
+    HypothesisCandidateResponse,
     HypothesisDecisionRequest,
     HypothesisGenerateRequest,
     HypothesisListResponse,
     HypothesisMatchResponse,
+    HypothesisPoolControlRequest,
     HypothesisPoolFinalizeRequest,
     HypothesisPoolResponse,
     HypothesisPoolRoundRequest,
@@ -113,12 +116,15 @@ class ResearchHypothesisController(BaseController):
                     request_id=request_id,
                     mode=payload.mode,
                     trigger_ids=list(payload.trigger_ids),
+                    source_ids=list(payload.source_ids),
                     research_goal=str(payload.research_goal or ""),
                     top_k=int(payload.top_k),
+                    frontier_size=int(payload.frontier_size),
                     max_rounds=int(payload.max_rounds),
                     candidate_count=int(payload.candidate_count),
                     constraints=dict(payload.constraints),
                     preference_profile=dict(payload.preference_profile),
+                    active_retrieval=payload.active_retrieval.model_dump(),
                     failure_mode=failure_mode,
                     allow_fallback=allow_fallback,
                 ),
@@ -142,12 +148,15 @@ class ResearchHypothesisController(BaseController):
                 request_id=request_id,
                 mode=payload.mode,
                 trigger_ids=list(payload.trigger_ids),
+                source_ids=list(payload.source_ids),
                 research_goal=str(payload.research_goal or ""),
                 top_k=int(payload.top_k),
+                frontier_size=int(payload.frontier_size),
                 max_rounds=int(payload.max_rounds),
                 candidate_count=int(payload.candidate_count),
                 constraints=dict(payload.constraints),
                 preference_profile=dict(payload.preference_profile),
+                active_retrieval=payload.active_retrieval.model_dump(),
                 failure_mode=failure_mode,
                 allow_fallback=allow_fallback,
             )
@@ -177,19 +186,39 @@ class ResearchHypothesisController(BaseController):
         request_id: str,
         mode: str,
         trigger_ids: list[str],
+        source_ids: list[str],
         research_goal: str,
         top_k: int,
+        frontier_size: int,
         max_rounds: int,
         candidate_count: int,
         constraints: dict[str, object],
         preference_profile: dict[str, object],
+        active_retrieval: dict[str, object],
         failure_mode: str | None,
         allow_fallback: bool,
     ) -> None:
         STORE.start_job(job_id)
         hypothesis_service = HypothesisService(STORE)
         try:
-            if mode == "multi_agent_pool":
+            if mode == "literature_frontier":
+                pool = await hypothesis_service.generate_literature_frontier_pool(
+                    workspace_id=workspace_id,
+                    source_ids=source_ids,
+                    request_id=request_id,
+                    generation_job_id=job_id,
+                    research_goal=research_goal,
+                    frontier_size=frontier_size,
+                    max_rounds=max_rounds,
+                    constraints=constraints,
+                    preference_profile=preference_profile,
+                    active_retrieval=active_retrieval,
+                )
+                result_ref = {
+                    "resource_type": "hypothesis_pool",
+                    "resource_id": str(pool["pool_id"]),
+                }
+            elif mode == "multi_agent_pool":
                 pool = await hypothesis_service.generate_multi_agent_pool(
                     workspace_id=workspace_id,
                     trigger_ids=trigger_ids,
@@ -308,6 +337,33 @@ class ResearchHypothesisController(BaseController):
             items=items, total=len(items)
         )
 
+    @patch(
+        "/hypotheses/candidates/{candidate_id}",
+        response_model=HypothesisCandidateResponse,
+        responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    )
+    async def patch_candidate(
+        self, candidate_id: str, request: Request
+    ) -> HypothesisCandidateResponse:
+        payload = await parse_request_model(request, HypothesisCandidatePatchRequest)
+        request_id = get_request_id(request.headers.get("x-request-id"))
+        try:
+            updated = self._hypothesis_service.patch_candidate_reasoning_chain(
+                candidate_id=candidate_id,
+                workspace_id=payload.workspace_id,
+                request_id=request_id,
+                reasoning_chain=payload.reasoning_chain,
+                reset_review_state=bool(payload.reset_review_state),
+            )
+        except HypothesisServiceError as exc:
+            raise_http_error(
+                status_code=exc.status_code,
+                code=exc.error_code,
+                message=exc.message,
+                details=exc.details,
+            )
+        return HypothesisCandidateResponse.model_validate(updated)
+
     @get(
         "/hypotheses/pools/{pool_id}/rounds",
         response_model=HypothesisRoundListResponse,
@@ -324,6 +380,31 @@ class ResearchHypothesisController(BaseController):
         )
         items = [item for item in self._hypothesis_service.list_pool_rounds(pool_id=pool_id)]
         return HypothesisRoundListResponse(items=items, total=len(items))
+
+    @post(
+        "/hypotheses/pools/{pool_id}/control",
+        response_model=HypothesisPoolResponse,
+        responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    )
+    async def control_pool(self, pool_id: str, request: Request) -> HypothesisPoolResponse:
+        payload = await parse_request_model(request, HypothesisPoolControlRequest)
+        request_id = get_request_id(request.headers.get("x-request-id"))
+        try:
+            updated = await self._hypothesis_service.control_pool(
+                pool_id=pool_id,
+                workspace_id=payload.workspace_id,
+                request_id=request_id,
+                action=payload.action,
+                source_ids=payload.source_ids,
+            )
+        except HypothesisServiceError as exc:
+            raise_http_error(
+                status_code=exc.status_code,
+                code=exc.error_code,
+                message=exc.message,
+                details=exc.details,
+            )
+        return HypothesisPoolResponse.model_validate(updated)
 
     @post(
         "/hypotheses/pools/{pool_id}/run-round",

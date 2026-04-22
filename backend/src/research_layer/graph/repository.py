@@ -158,6 +158,42 @@ class GraphRepository:
     def list_edges(self, *, workspace_id: str) -> list[dict[str, object]]:
         return self._store.list_graph_edges(workspace_id)
 
+    def create_reasoning_chain(
+        self,
+        *,
+        workspace_id: str,
+        chain_type: str,
+        title: str,
+        payload: dict[str, object],
+        request_id: str | None,
+        status: str,
+    ) -> dict[str, object]:
+        return self._store.create_reasoning_chain(
+            workspace_id=workspace_id,
+            chain_type=chain_type,
+            title=title,
+            payload=payload,
+            request_id=request_id,
+            status=status,
+        )
+
+    def get_reasoning_chain(self, reasoning_chain_id: str) -> dict[str, object] | None:
+        return self._store.get_reasoning_chain(reasoning_chain_id)
+
+    def list_reasoning_chains(
+        self, *, workspace_id: str, status: str | None = None
+    ) -> list[dict[str, object]]:
+        return self._store.list_reasoning_chains(
+            workspace_id=workspace_id, status=status
+        )
+
+    def update_reasoning_chain(
+        self, *, reasoning_chain_id: str, status: str
+    ) -> dict[str, object] | None:
+        return self._store.update_reasoning_chain(
+            reasoning_chain_id=reasoning_chain_id, status=status
+        )
+
     def update_edge(
         self, *, edge_id: str, status: str | None, strength: float | None
     ) -> dict[str, object] | None:
