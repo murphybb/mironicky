@@ -14,9 +14,14 @@ from research_layer.api.schemas.hypothesis import (
     HypothesisResponse,
 )
 from research_layer.api.schemas.source import (
+    CandidateRecord,
     SourceImportRequest,
     SourceListResponse,
     SourceResponse,
+)
+from research_layer.services.argument_graph_types import (
+    normalize_relation_type,
+    normalize_unit_type,
 )
 
 
@@ -100,6 +105,38 @@ def test_source_import_request_rejects_unknown_input_mode() -> None:
             source_input_mode="clipboard",
             source_input="https://example.org/paper/123",
         )
+
+
+def test_prompt_b_type_maps_match_graph_compatible_types() -> None:
+    assert normalize_unit_type("claim") == "conclusion"
+    assert normalize_unit_type("evidence") == "evidence"
+    assert normalize_unit_type("premise") == "assumption"
+    assert normalize_unit_type("contradiction") == "conflict"
+    assert normalize_unit_type("open_question") == "gap"
+    assert normalize_relation_type("supports") == "supports"
+    assert normalize_relation_type("relies_on") == "requires"
+    assert normalize_relation_type("contradicts") == "conflicts"
+    assert normalize_relation_type("leads_to") == "derives"
+
+
+def test_candidate_record_accepts_prompt_b_semantic_metadata() -> None:
+    record = CandidateRecord(
+        candidate_id="cand_1",
+        workspace_id="ws_alpha_01",
+        source_id="src_1",
+        candidate_type="conclusion",
+        semantic_type="claim",
+        text="研究结论需要由证据支撑。",
+        quote="研究结论需要由证据支撑。",
+        source_span={"page": 2, "block_id": "p2-b3", "paragraph_id": "p2-b3-par0"},
+        trace_refs={"block_id": "p2-b3"},
+        status="pending",
+    )
+
+    assert record.candidate_type == "conclusion"
+    assert record.semantic_type == "claim"
+    assert record.quote == "研究结论需要由证据支撑。"
+    assert record.source_span["block_id"] == "p2-b3"
 
 
 def test_graph_archive_request_and_response_schema_shape() -> None:

@@ -8,7 +8,15 @@ from pydantic import BaseModel, Field
 from research_layer.api.schemas.common import WorkspaceScopedBody
 
 SOURCE_TYPE_VALUES = {"paper", "note", "feedback", "failure_record", "dialogue"}
-CANDIDATE_TYPE_VALUES = {"evidence", "assumption", "conflict", "failure", "validation"}
+CANDIDATE_TYPE_VALUES = {
+    "evidence",
+    "assumption",
+    "conflict",
+    "failure",
+    "validation",
+    "conclusion",
+    "gap",
+}
 CANDIDATE_STATUS_VALUES = {"pending", "confirmed", "rejected"}
 SOURCE_INPUT_MODE_VALUES = {"auto", "manual_text", "url", "local_file"}
 
@@ -92,9 +100,12 @@ class CandidateRecord(BaseModel):
     workspace_id: str
     source_id: str
     candidate_type: str
+    semantic_type: str | None = None
     text: str
     status: str
     source_span: dict[str, object]
+    quote: str | None = None
+    trace_refs: dict[str, object] = Field(default_factory=dict)
     candidate_batch_id: str | None = None
     extraction_job_id: str | None = None
     extractor_name: str | None = None

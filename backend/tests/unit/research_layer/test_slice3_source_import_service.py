@@ -8,7 +8,10 @@ from datetime import datetime
 import pytest
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
-from research_layer.services.source_import_service import SourceImportError, SourceImportService
+from research_layer.services.source_import_service import (
+    SourceImportError,
+    SourceImportService,
+)
 
 
 def _build_store(tmp_path) -> ResearchApiStateStore:
@@ -108,6 +111,53 @@ def test_source_import_service_parses_docx_local_file(tmp_path) -> None:
     assert "Docx parsed content" in source["content"]
 
 
+def test_source_import_service_persists_structured_pdf_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    service = SourceImportService(store)
+
+    monkeypatch.setattr(service, "_load_local_file_bytes", lambda _payload: b"%PDF")
+    monkeypatch.setattr(
+        service,
+        "_extract_pdf_document",
+        lambda _raw: {
+            "parser": "pymupdf",
+            "pages": 1,
+            "chars": 33,
+            "text": "First claim. Supporting evidence.",
+            "blocks": [
+                {
+                    "anchor_id": "p1-b0",
+                    "page_number": 1,
+                    "block_index": 0,
+                    "paragraph_ids": ["p1-b0-par0"],
+                    "start": 0,
+                    "end": 33,
+                    "text": "First claim. Supporting evidence.",
+                }
+            ],
+        },
+    )
+
+    source = service.import_source(
+        workspace_id="ws_pdf_01",
+        source_type="paper",
+        title=None,
+        content=None,
+        metadata={},
+        source_input_mode="local_file",
+        local_file={"file_name": "sample.pdf", "local_path": "C:/tmp/sample.pdf"},
+        request_id="req_pdf_01",
+    )
+
+    parser_metadata = source["metadata"]["parser_metadata"]
+    assert parser_metadata["parser"] == "pymupdf"
+    assert parser_metadata["pages"] == 1
+    assert parser_metadata["blocks"][0]["anchor_id"] == "p1-b0"
+    assert source["content"] == "First claim. Supporting evidence."
+
+
 def test_source_import_service_local_file_does_not_promote_body_doi(tmp_path) -> None:
     store = _build_store(tmp_path)
     service = SourceImportService(store)
@@ -156,7 +206,9 @@ def test_source_import_service_local_file_keeps_supplemental_text(tmp_path) -> N
     assert "manual supplement line" in normalized_content
 
 
-def test_source_import_service_local_file_respects_explicit_metadata_doi(tmp_path) -> None:
+def test_source_import_service_local_file_respects_explicit_metadata_doi(
+    tmp_path,
+) -> None:
     store = _build_store(tmp_path)
     service = SourceImportService(store)
     docx_bytes = _build_minimal_docx_bytes("Body has no reliable doi")

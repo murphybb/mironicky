@@ -141,6 +141,9 @@ class ExtractionWorker:
             parsed = self._parser.parse(
                 source_type=str(source["source_type"]),
                 content=str(source["content"]),
+                metadata=source.get("metadata")
+                if isinstance(source.get("metadata"), dict)
+                else None,
             )
             self._store.update_source_processing(
                 source_id=source_id,
