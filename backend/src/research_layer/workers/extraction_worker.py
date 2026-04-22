@@ -160,6 +160,7 @@ class ExtractionWorker:
             fallback_used = False
             degraded_reason: str | None = None
             partial_failure_count = 0
+            raw_relations: list[dict[str, object]] = []
 
             try:
                 prompt_chunk = self._build_prompt_chunk(parsed)
@@ -190,7 +191,9 @@ class ExtractionWorker:
                         request_id=request_id,
                     )
                 )
-                await RelationExtractionService(self._gateway).rebuild_relations(
+                relations, latest_trace = await RelationExtractionService(
+                    self._gateway
+                ).rebuild_relations(
                     request_id=request_id,
                     workspace_id=workspace_id,
                     source_id=str(source["source_id"]),
@@ -202,6 +205,7 @@ class ExtractionWorker:
                     backend=backend,
                     model=model,
                 )
+                raw_relations.extend(relations)
             except ResearchLLMError as exc:
                 if allow_fallback and exc.error_code in _EXTRACTION_FALLBACK_ALLOWED_ERRORS:
                     fallback_used = True
@@ -229,6 +233,16 @@ class ExtractionWorker:
                         degraded_reason=degraded_reason,
                         existing_candidates=raw_candidates,
                         minimum_count=2,
+                    )
+                )
+            if fallback_used and len(raw_candidates) < 5:
+                raw_candidates.extend(
+                    self._build_supplemental_fallback_candidates(
+                        parsed=parsed,
+                        request_id=request_id,
+                        degraded_reason=degraded_reason,
+                        existing_candidates=raw_candidates,
+                        minimum_count=5,
                     )
                 )
             candidate_type_count = len(
@@ -281,6 +295,25 @@ class ExtractionWorker:
                     else None
                 ),
             )
+            unit_candidate_ids = {
+                str((item.get("trace_refs") or {}).get("argument_unit_id") or ""): str(
+                    item["candidate_id"]
+                )
+                for item in persisted
+                if isinstance(item.get("trace_refs"), dict)
+            }
+            relation_candidates = self._map_relations_to_candidates(
+                relations=raw_relations,
+                unit_candidate_ids=unit_candidate_ids,
+            )
+            if relation_candidates:
+                self._store.add_relation_candidates_to_batch(
+                    candidate_batch_id=batch_id,
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    job_id=job_id,
+                    relations=relation_candidates,
+                )
             self._store.update_candidate_batch_llm_trace(
                 candidate_batch_id=batch_id,
                 provider_backend=(
@@ -419,6 +452,50 @@ class ExtractionWorker:
             error=error,
         )
         return {"status": "failed", "candidate_batch_id": batch_id, "error": error}
+
+    def _map_relations_to_candidates(
+        self,
+        *,
+        relations: list[dict[str, object]],
+        unit_candidate_ids: dict[str, str],
+    ) -> list[dict[str, object]]:
+        mapped: list[dict[str, object]] = []
+        for relation in relations:
+            source_unit_id = str(relation.get("source_unit_id") or "")
+            target_unit_id = str(relation.get("target_unit_id") or "")
+            source_candidate_id = unit_candidate_ids.get(source_unit_id)
+            target_candidate_id = unit_candidate_ids.get(target_unit_id)
+            if source_candidate_id is None or target_candidate_id is None:
+                mapped.append(
+                    {
+                        "source_candidate_id": source_candidate_id,
+                        "target_candidate_id": target_candidate_id,
+                        "semantic_relation_type": relation.get("semantic_relation_type"),
+                        "relation_type": relation.get("relation_type"),
+                        "relation_status": "unresolved",
+                        "quote": relation.get("quote"),
+                        "trace_refs": {
+                            "source_unit_id": source_unit_id,
+                            "target_unit_id": target_unit_id,
+                        },
+                    }
+                )
+                continue
+            mapped.append(
+                {
+                    "source_candidate_id": source_candidate_id,
+                    "target_candidate_id": target_candidate_id,
+                    "semantic_relation_type": relation.get("semantic_relation_type"),
+                    "relation_type": relation.get("relation_type"),
+                    "relation_status": relation.get("relation_status") or "unresolved",
+                    "quote": relation.get("quote"),
+                    "trace_refs": {
+                        "source_unit_id": source_unit_id,
+                        "target_unit_id": target_unit_id,
+                    },
+                }
+            )
+        return mapped
 
     def _map_argument_units_to_candidates(
         self,
@@ -805,7 +882,13 @@ class ExtractionWorker:
             )
             existing_types.add(candidate_type)
 
-        generic_backfill_types = ("evidence", "assumption", "validation", "failure")
+        generic_backfill_types = (
+            "evidence",
+            "assumption",
+            "conflict",
+            "failure",
+            "validation",
+        )
         for candidate_type in generic_backfill_types:
             if len(existing_candidates) + len(supplemental) >= minimum_count:
                 break

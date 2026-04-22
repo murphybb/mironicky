@@ -229,3 +229,104 @@ def test_confirm_creates_version_diff_payload_query_back(tmp_path) -> None:
     assert diff_payload["change_type"] == "candidate_confirm_materialization"
     assert "candidate_id" in diff_payload
     assert "added" in diff_payload
+
+
+def test_build_graph_uses_resolved_relation_candidates_and_skips_unresolved(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    workspace_id = "ws_slice5_resolved_relation_build"
+    source = store.create_source(
+        workspace_id=workspace_id,
+        source_type="paper",
+        title="resolved relation build",
+        content="Evidence supports conclusion. Unresolved link is ignored.",
+        metadata={},
+        import_request_id="req_slice5_rel_seed",
+    )
+    job = store.create_job(
+        job_type="source_extract",
+        workspace_id=workspace_id,
+        request_id="req_slice5_rel_seed",
+    )
+    batch = store.create_candidate_batch(
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        request_id="req_slice5_rel_seed",
+    )
+    candidates = store.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        candidates=[
+            {
+                "candidate_type": "evidence",
+                "semantic_type": "evidence",
+                "text": "Evidence sentence.",
+                "source_span": {"page": 1, "block_id": "p1-b0"},
+                "quote": "Evidence sentence.",
+                "trace_refs": {"argument_unit_id": "u_evidence"},
+                "extractor_name": "argument_unit_extractor",
+            },
+            {
+                "candidate_type": "conclusion",
+                "semantic_type": "claim",
+                "text": "Conclusion sentence.",
+                "source_span": {"page": 1, "block_id": "p1-b1"},
+                "quote": "Conclusion sentence.",
+                "trace_refs": {"argument_unit_id": "u_claim"},
+                "extractor_name": "argument_unit_extractor",
+            },
+        ],
+    )
+    evidence_candidate_id = str(candidates[0]["candidate_id"])
+    conclusion_candidate_id = str(candidates[1]["candidate_id"])
+    store.add_relation_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        relations=[
+            {
+                "source_candidate_id": evidence_candidate_id,
+                "target_candidate_id": conclusion_candidate_id,
+                "semantic_relation_type": "supports",
+                "relation_type": "supports",
+                "relation_status": "resolved",
+                "quote": "Evidence supports conclusion.",
+                "trace_refs": {"block_id": "p1-b0"},
+            },
+            {
+                "source_candidate_id": conclusion_candidate_id,
+                "target_candidate_id": evidence_candidate_id,
+                "semantic_relation_type": "unknown",
+                "relation_type": "conflicts",
+                "relation_status": "unresolved",
+                "quote": "Unresolved link is ignored.",
+                "trace_refs": {"block_id": "p1-b2"},
+            },
+        ],
+    )
+    confirmation = CandidateConfirmationService(store)
+    confirmation.confirm(
+        workspace_id=workspace_id,
+        candidate_id=evidence_candidate_id,
+        request_id="req_slice5_confirm_evidence",
+    )
+    confirmation.confirm(
+        workspace_id=workspace_id,
+        candidate_id=conclusion_candidate_id,
+        request_id="req_slice5_confirm_conclusion",
+    )
+
+    repo = GraphRepository(store)
+    GraphBuildService(repo).build_workspace_graph(
+        workspace_id=workspace_id,
+        request_id="req_slice5_build_resolved",
+    )
+
+    active_edges = [
+        edge for edge in repo.list_edges(workspace_id=workspace_id) if edge["status"] == "active"
+    ]
+    assert [edge["edge_type"] for edge in active_edges] == ["supports"]
+    assert active_edges[0]["object_ref_type"] == "relation_candidate"

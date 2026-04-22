@@ -8,6 +8,8 @@ from research_layer.graph.repository import GraphRepository
 OBJECT_TO_NODE_TYPE = {
     "evidence": "evidence",
     "assumption": "assumption",
+    "conclusion": "conclusion",
+    "gap": "gap",
     "conflict": "conflict",
     "failure": "failure",
     "validation": "validation",
@@ -36,6 +38,7 @@ class GraphBuildService:
             if str(node.get("status")) == "archived"
         }
         source_nodes: dict[str, list[dict[str, object]]] = defaultdict(list)
+        candidate_nodes: dict[str, dict[str, object]] = {}
         created_nodes: list[dict[str, object]] = []
         created_edges: list[dict[str, object]] = []
         skipped_archived_count = 0
@@ -65,8 +68,40 @@ class GraphBuildService:
             )
             created_nodes.append(node)
             source_nodes[str(obj["source_id"])].append(node)
+            candidate_id = str(obj.get("candidate_id") or "")
+            if candidate_id:
+                candidate_nodes[candidate_id] = node
+
+        relation_candidates = self._repository.list_relation_candidates(
+            workspace_id=workspace_id
+        )
+        sources_with_relation_candidates = {
+            str(item["source_id"]) for item in relation_candidates
+        }
+        for relation in relation_candidates:
+            if str(relation.get("relation_status")) != "resolved":
+                continue
+            relation_type = str(relation.get("relation_type") or "").strip()
+            if not relation_type:
+                continue
+            source_node = candidate_nodes.get(str(relation.get("source_candidate_id") or ""))
+            target_node = candidate_nodes.get(str(relation.get("target_candidate_id") or ""))
+            if source_node is None or target_node is None:
+                continue
+            edge = self._repository.create_edge(
+                workspace_id=workspace_id,
+                source_node_id=str(source_node["node_id"]),
+                target_node_id=str(target_node["node_id"]),
+                edge_type=relation_type,
+                object_ref_type="relation_candidate",
+                object_ref_id=str(relation["relation_candidate_id"]),
+                strength=0.9,
+            )
+            created_edges.append(edge)
 
         for source_id, nodes in source_nodes.items():
+            if source_id in sources_with_relation_candidates:
+                continue
             evidence_nodes = [node for node in nodes if node["node_type"] == "evidence"]
             anchor = evidence_nodes[0] if evidence_nodes else nodes[0]
             for node in nodes:

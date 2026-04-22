@@ -28,6 +28,11 @@ class GraphRepository:
     def list_confirmed_objects(self, workspace_id: str) -> list[dict[str, object]]:
         return self._store.list_confirmed_objects(workspace_id)
 
+    def list_relation_candidates(
+        self, *, workspace_id: str
+    ) -> list[dict[str, object]]:
+        return self._store.list_relation_candidates(workspace_id=workspace_id)
+
     def reset_workspace_graph(self, workspace_id: str) -> None:
         self._store.clear_graph_workspace(workspace_id)
 
