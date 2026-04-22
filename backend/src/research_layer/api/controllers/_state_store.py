@@ -1212,6 +1212,91 @@ class ResearchApiStateStore:
                 items.append(source)
         return items
 
+    def list_workspaces(self) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            """
+            WITH workspace_ids AS (
+                SELECT workspace_id FROM sources
+                UNION
+                SELECT workspace_id FROM candidates
+                UNION
+                SELECT workspace_id FROM graph_nodes
+                UNION
+                SELECT workspace_id FROM graph_edges
+                UNION
+                SELECT workspace_id FROM routes
+            ),
+            source_counts AS (
+                SELECT workspace_id, COUNT(*) AS source_count
+                FROM sources
+                GROUP BY workspace_id
+            ),
+            candidate_counts AS (
+                SELECT workspace_id, COUNT(*) AS candidate_count
+                FROM candidates
+                GROUP BY workspace_id
+            ),
+            node_counts AS (
+                SELECT workspace_id, COUNT(*) AS node_count
+                FROM graph_nodes
+                GROUP BY workspace_id
+            ),
+            edge_counts AS (
+                SELECT workspace_id, COUNT(*) AS edge_count
+                FROM graph_edges
+                GROUP BY workspace_id
+            ),
+            route_counts AS (
+                SELECT workspace_id, COUNT(*) AS route_count
+                FROM routes
+                GROUP BY workspace_id
+            ),
+            updates AS (
+                SELECT workspace_id, MAX(updated_at) AS updated_at
+                FROM (
+                    SELECT workspace_id, updated_at FROM sources
+                    UNION ALL
+                    SELECT workspace_id, updated_at FROM graph_nodes
+                    UNION ALL
+                    SELECT workspace_id, updated_at FROM graph_edges
+                )
+                GROUP BY workspace_id
+            )
+            SELECT
+                w.workspace_id,
+                COALESCE(s.source_count, 0) AS source_count,
+                COALESCE(c.candidate_count, 0) AS candidate_count,
+                COALESCE(n.node_count, 0) AS node_count,
+                COALESCE(e.edge_count, 0) AS edge_count,
+                COALESCE(r.route_count, 0) AS route_count,
+                u.updated_at AS updated_at
+            FROM workspace_ids w
+            LEFT JOIN source_counts s ON s.workspace_id = w.workspace_id
+            LEFT JOIN candidate_counts c ON c.workspace_id = w.workspace_id
+            LEFT JOIN node_counts n ON n.workspace_id = w.workspace_id
+            LEFT JOIN edge_counts e ON e.workspace_id = w.workspace_id
+            LEFT JOIN route_counts r ON r.workspace_id = w.workspace_id
+            LEFT JOIN updates u ON u.workspace_id = w.workspace_id
+            ORDER BY u.updated_at DESC NULLS LAST, w.workspace_id ASC
+            """
+        )
+        return [
+            {
+                "workspace_id": row["workspace_id"],
+                "source_count": int(row["source_count"] or 0),
+                "candidate_count": int(row["candidate_count"] or 0),
+                "node_count": int(row["node_count"] or 0),
+                "edge_count": int(row["edge_count"] or 0),
+                "route_count": int(row["route_count"] or 0),
+                "updated_at": (
+                    self._from_iso(row["updated_at"])
+                    if row["updated_at"] is not None
+                    else None
+                ),
+            }
+            for row in rows
+        ]
+
     def list_source_topic_clusters(self, *, workspace_id: str) -> list[dict[str, object]]:
         rows = self._fetchall(
             """

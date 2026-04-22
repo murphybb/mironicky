@@ -10,6 +10,7 @@ import {
   getGraphReport,
   getGraphSupportChains,
   importSource,
+  listWorkspaces,
 } from './api.ts';
 
 async function withMockFetch(handler: (url: string, init?: RequestInit) => unknown, run: () => Promise<void>) {
@@ -126,4 +127,35 @@ test('pdf argument graph flow wrappers call import, extract, confirm, and graph 
   assert.equal(calls[0].body.source_input_mode, 'local_file');
   assert.equal(calls[1].body.async_mode, true);
   assert.deepEqual(calls[2].body.candidate_ids, ['cand_1']);
+});
+
+test('workspace list wrapper calls the backend workspace index', async () => {
+  const calls: string[] = [];
+
+  await withMockFetch(
+    (url) => {
+      calls.push(url);
+      return {
+        items: [
+          {
+            workspace_id: 'ws_pdf_real',
+            source_count: 1,
+            node_count: 24,
+            edge_count: 23,
+            route_count: 0,
+            candidate_count: 0,
+            updated_at: '2026-04-22T10:00:00',
+          },
+        ],
+        total: 1,
+      };
+    },
+    async () => {
+      const result = await listWorkspaces();
+      assert.equal(result.items[0].workspace_id, 'ws_pdf_real');
+      assert.equal(result.items[0].node_count, 24);
+    }
+  );
+
+  assert.deepEqual(calls, ['/api/v1/research/workspaces']);
 });

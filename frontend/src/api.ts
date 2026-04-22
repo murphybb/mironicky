@@ -148,6 +148,16 @@ export interface SourceRecord {
   updated_at?: string;
 }
 
+export interface WorkspaceSummaryRecord {
+  workspace_id: string;
+  source_count: number;
+  candidate_count: number;
+  node_count: number;
+  edge_count: number;
+  route_count: number;
+  updated_at?: string | null;
+}
+
 export interface JobStatusResponse {
   job_id: string;
   job_type: string;
@@ -712,6 +722,10 @@ export async function listCandidates(workspaceId: string): Promise<ListResponse<
 
 export async function listSources(workspaceId: string): Promise<ListResponse<SourceRecord>> {
   return request<ListResponse<SourceRecord>>(`/api/v1/research/sources?workspace_id=${encodeURIComponent(workspaceId)}`);
+}
+
+export async function listWorkspaces(): Promise<ListResponse<WorkspaceSummaryRecord>> {
+  return request<ListResponse<WorkspaceSummaryRecord>>('/api/v1/research/workspaces');
 }
 
 export async function confirmCandidates(workspaceId: string, candidateIds: string[]) {

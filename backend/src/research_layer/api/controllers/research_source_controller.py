@@ -48,6 +48,8 @@ from research_layer.api.schemas.source import (
     SourceListResponse,
     SourceImportRequest,
     SourceResponse,
+    WorkspaceSummaryListResponse,
+    WorkspaceSummaryRecord,
 )
 from research_layer.config.feature_flags import (
     RAW_BOOTSTRAP_FLAG,
@@ -283,6 +285,14 @@ class ResearchSourceController(BaseController):
             for item in STORE.list_sources(workspace_id=workspace)
         ]
         return SourceListResponse(items=items, total=len(items))
+
+    @get("/workspaces", response_model=WorkspaceSummaryListResponse)
+    async def list_workspaces(self) -> WorkspaceSummaryListResponse:
+        items = [
+            WorkspaceSummaryRecord.model_validate(item)
+            for item in STORE.list_workspaces()
+        ]
+        return WorkspaceSummaryListResponse(items=items, total=len(items))
 
     @get(
         "/sources/{source_id}",

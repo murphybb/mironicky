@@ -110,6 +110,33 @@ def test_url_source_import_auto_detects_mode_and_enriches_metadata(monkeypatch) 
     assert "Auto extracted article content" in payload["content"]
 
 
+def test_workspaces_endpoint_lists_existing_non_empty_workspaces() -> None:
+    client = _build_test_client()
+    response = client.post(
+        "/api/v1/research/sources/import",
+        json={
+            "workspace_id": "ws_endpoint_has_data",
+            "source_type": "paper",
+            "title": "workspace index source",
+            "content": "content",
+        },
+    )
+    assert response.status_code == 200
+
+    listed = client.get("/api/v1/research/workspaces")
+
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] >= 1
+    workspace = next(
+        item
+        for item in payload["items"]
+        if item["workspace_id"] == "ws_endpoint_has_data"
+    )
+    assert workspace["source_count"] == 1
+    assert workspace["updated_at"]
+
+
 def test_url_source_import_remote_fetch_failure_is_explicit(monkeypatch) -> None:
     def _raise_remote_fetch(_self, _url: str) -> str:
         raise SourceImportError(

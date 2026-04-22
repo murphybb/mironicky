@@ -62,6 +62,21 @@ class SourceListResponse(BaseModel):
     total: int
 
 
+class WorkspaceSummaryRecord(BaseModel):
+    workspace_id: str
+    source_count: int = 0
+    candidate_count: int = 0
+    node_count: int = 0
+    edge_count: int = 0
+    route_count: int = 0
+    updated_at: datetime | None = None
+
+
+class WorkspaceSummaryListResponse(BaseModel):
+    items: list[WorkspaceSummaryRecord]
+    total: int
+
+
 class SourceExtractRequest(WorkspaceScopedBody):
     async_mode: bool = True
 
