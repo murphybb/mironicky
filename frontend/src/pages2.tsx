@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState, useEffect } from 'react';
+﻿import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   createGraphNode,
   createGraphEdge,
@@ -17,6 +17,12 @@ import {
   getGraphReport,
 } from './api';
 import { normalizeGraphInspectorPayloads } from './graph-inspector-helpers';
+import {
+  clampZoom,
+  computeClusteredLayout,
+  loadPinnedPositions,
+  savePinnedPositions,
+} from './workbench-graph-layout';
 
 function isJobTimeoutLike(error: unknown) {
   const code = String((error as any)?.envelope?.error_code || (error as any)?.error_code || '').toLowerCase();
@@ -48,9 +54,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   const [editLabel, setEditLabel] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editTags, setEditTags] = useState('');
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const [startPan, setStartPan] = useState({ x: 0, y: 0 });
+  const [pinnedPositions, setPinnedPositions] = useState<Record<string, { x: number; y: number }>>(() =>
+    loadPinnedPositions(workspaceId)
+  );
+  const [draggedNode, setDraggedNode] = useState<any>(null);
+  const nodeDragMovedRef = useRef(false);
   const [inspectorState, setInspectorState] = useState<any>({
     status: 'idle',
     error: null,
@@ -58,27 +69,37 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   });
 
   useEffect(() => {
+    setPinnedPositions(loadPinnedPositions(workspaceId));
+  }, [workspaceId]);
+
+  useEffect(() => {
     if (initialNodes) {
+      const normalizedNodes = initialNodes.map((node: any) => ({
+        ...node,
+        node_type: normalizeNodeType(node?.node_type),
+      }));
+      const layout = computeClusteredLayout(normalizedNodes, initialEdges || [], pinnedPositions);
       setNodes(
-        initialNodes.map((node: any) => ({
+        normalizedNodes.map((node: any) => ({
           ...node,
-          node_type: normalizeNodeType(node?.node_type),
+          x: layout[node.node_id]?.x ?? Number(node.x || 0),
+          y: layout[node.node_id]?.y ?? Number(node.y || 0),
         }))
       );
     }
     if (initialEdges) setEdges(initialEdges);
-  }, [initialNodes, initialEdges]);
+  }, [initialNodes, initialEdges, pinnedPositions]);
 
   useEffect(() => {
     if (!selNode?.node_id) return;
-    const latest = (initialNodes || []).find((node: any) => node.node_id === selNode.node_id);
+    const latest = (nodes || []).find((node: any) => node.node_id === selNode.node_id);
     if (latest) {
       setSelNode({ ...latest, node_type: normalizeNodeType(latest?.node_type) });
       return;
     }
     setSelNode(null);
     setIsEditingNode(false);
-  }, [initialNodes, selNode?.node_id]);
+  }, [nodes, selNode?.node_id]);
 
   useEffect(() => {
     if (!selNode?.node_id) {
@@ -117,16 +138,60 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('.graph-node')) return;
     setIsDragging(true);
-    setStartPan({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    setStartPan({ x: e.clientX - viewport.x, y: e.clientY - viewport.y });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (draggedNode) {
+      const nextX = draggedNode.startX + (e.clientX - draggedNode.startClientX) / viewport.scale;
+      const nextY = draggedNode.startY + (e.clientY - draggedNode.startClientY) / viewport.scale;
+      nodeDragMovedRef.current =
+        nodeDragMovedRef.current ||
+        Math.abs(e.clientX - draggedNode.startClientX) > 3 ||
+        Math.abs(e.clientY - draggedNode.startClientY) > 3;
+      setDraggedNode({ ...draggedNode, currentX: nextX, currentY: nextY });
+      setNodes((prev: any[]) =>
+        prev.map((node: any) => (node.node_id === draggedNode.nodeId ? { ...node, x: nextX, y: nextY } : node))
+      );
+      return;
+    }
     if (!isDragging) return;
-    setPan({ x: e.clientX - startPan.x, y: e.clientY - startPan.y });
+    setViewport((prev) => ({ ...prev, x: e.clientX - startPan.x, y: e.clientY - startPan.y }));
   };
 
   const handleMouseUp = () => {
+    if (draggedNode) {
+      const nextPinned = {
+        ...pinnedPositions,
+        [draggedNode.nodeId]: {
+          x: draggedNode.currentX ?? draggedNode.startX,
+          y: draggedNode.currentY ?? draggedNode.startY,
+        },
+      };
+      setPinnedPositions(savePinnedPositions(workspaceId, nextPinned));
+      setDraggedNode(null);
+    }
     setIsDragging(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    setViewport((prev) => ({ ...prev, scale: clampZoom(prev.scale, e.deltaY) }));
+  };
+
+  const handleNodeMouseDown = (e: React.MouseEvent, node: any) => {
+    if (e.button !== 0 || isEdgeMode) return;
+    e.stopPropagation();
+    nodeDragMovedRef.current = false;
+    setDraggedNode({
+      nodeId: node.node_id,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startX: Number(node.x || 0),
+      startY: Number(node.y || 0),
+      currentX: Number(node.x || 0),
+      currentY: Number(node.y || 0),
+    });
   };
 
   const addNode = () => {
@@ -213,6 +278,10 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   };
 
   const handleNodeClick = async (node: any) => {
+    if (nodeDragMovedRef.current) {
+      nodeDragMovedRef.current = false;
+      return;
+    }
     if (!isEdgeMode) {
       setSelNode(node);
       setIsEditingNode(false);
@@ -403,33 +472,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
       return;
     }
 
-    const typeOrder: Record<string, number> = {
-      c: 0,
-      conclusion: 0,
-      e: 1,
-      evidence: 1,
-      a: 2,
-      assumption: 2,
-      conflict: 3,
-      f: 4,
-      failure: 4,
-      g: 5,
-      validation: 5,
-      gap: 5,
-    };
-    const sorted = [...nodes].sort((a: any, b: any) => {
-      const ta = typeOrder[a?.node_type] ?? 9;
-      const tb = typeOrder[b?.node_type] ?? 9;
-      if (ta !== tb) return ta - tb;
-      return String(a?.short_label ?? '').localeCompare(String(b?.short_label ?? ''), 'zh-Hans-CN');
-    });
-
-    const next = sorted.map((node: any, index: number) => ({
+    const layout = computeClusteredLayout(nodes, edges, {});
+    const next = nodes.map((node: any) => ({
       ...node,
-      x: 120 + (index % 4) * 220,
-      y: 80 + Math.floor(index / 4) * 170,
+      x: layout[node.node_id]?.x ?? node.x,
+      y: layout[node.node_id]?.y ?? node.y,
     }));
 
+    setPinnedPositions(savePinnedPositions(workspaceId, {}));
     setNodes(next);
     if (selNode?.node_id) {
       const mapped = next.find((node: any) => node.node_id === selNode.node_id);
@@ -507,10 +557,12 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
+          onWheel={handleWheel}
           style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
         >
-          <div className="canvas-bg" style={{ backgroundPosition: `${pan.x}px ${pan.y}px` }}></div>
-          <div style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, width: '100%', height: '100%', position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          <div className="zoom-hud">{Math.round(viewport.scale * 100)}%</div>
+          <div className="canvas-bg" style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px` }}></div>
+          <div style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0', width: '100%', height: '100%', position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <svg className="edges" style={{ pointerEvents: 'none' }}>
               {edges.map((e: any, i: number) => {
                 const s = nodes.find((n: any) => n.node_id === e.source_node_id);
@@ -532,6 +584,7 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
                   key={n.node_id}
                   className={`graph-node gn-${n.node_type} ${selNode?.node_id === n.node_id ? 'sel' : ''} ${pendingEdgeSourceId === n.node_id ? 'sel' : ''}`}
                   style={{ left: n.x, top: n.y }}
+                  onMouseDown={(event) => handleNodeMouseDown(event, n)}
                   onClick={() => handleNodeClick(n)}
                 >
                   <div className="gn-inner">
