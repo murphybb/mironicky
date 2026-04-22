@@ -657,6 +657,43 @@ export async function getGraph(workspaceId: string): Promise<GraphResponse> {
   return normalizeGraph(data);
 }
 
+export async function getGraphSupportChains(workspaceId: string, conclusionNodeId: string, maxChains = 5) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/support-chains`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      conclusion_node_id: conclusionNodeId,
+      max_chains: maxChains,
+    },
+  });
+}
+
+export async function getGraphPredictedLinks(workspaceId: string, nodeId: string, topK = 8) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/predicted-links`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      node_id: nodeId,
+      top_k: topK,
+    },
+  });
+}
+
+export async function getGraphDeepChains(workspaceId: string, nodeId: string, maxChains = 5) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/deep-chains`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      node_id: nodeId,
+      max_chains: maxChains,
+    },
+  });
+}
+
+export async function getGraphReport(workspaceId: string) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/report`);
+}
+
 export async function listVersions(workspaceId?: string) {
   const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
   return request<ListResponse<any>>(`/api/v1/research/versions${query}`);

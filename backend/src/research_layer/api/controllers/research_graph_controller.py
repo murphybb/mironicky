@@ -26,15 +26,18 @@ from research_layer.api.schemas.graph import (
     GraphArchiveRequest,
     GraphArchiveResponse,
     GraphBuildResponse,
+    GraphDeepChainsRequest,
     GraphEdgeCreateRequest,
     GraphEdgePatchRequest,
     GraphEdgeResponse,
     GraphNodeCreateRequest,
     GraphNodePatchRequest,
     GraphNodeResponse,
+    GraphPredictedLinksRequest,
     GraphQueryRequest,
     GraphReportResponse,
     GraphResponse,
+    GraphSupportChainsRequest,
     GraphVersionDiffResponse,
     GraphVersionListResponse,
     GraphVersionRecord,
@@ -208,6 +211,104 @@ class ResearchGraphController(BaseController):
             metrics=report["summary"],
         )
         return GraphReportResponse.model_validate(report)
+
+    def _ensure_payload_workspace(self, *, path_workspace_id: str, payload_workspace_id: str) -> None:
+        ensure(
+            path_workspace_id == payload_workspace_id,
+            status_code=409,
+            code=ResearchErrorCode.CONFLICT.value,
+            message="workspace_id does not match path workspace",
+            details={
+                "path_workspace_id": path_workspace_id,
+                "payload_workspace_id": payload_workspace_id,
+            },
+        )
+
+    @post(
+        "/graph/{workspace_id}/support-chains",
+        response_model=dict[str, object],
+        responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    )
+    async def get_graph_support_chains(
+        self, workspace_id: str, request: Request
+    ) -> dict[str, object]:
+        workspace = validate_workspace_id(workspace_id)
+        payload = await parse_request_model(request, GraphSupportChainsRequest)
+        self._ensure_payload_workspace(
+            path_workspace_id=workspace,
+            payload_workspace_id=payload.workspace_id,
+        )
+        result = self._query_service.query_typed_metapath_paths(
+            workspace_id=workspace,
+            start_node_ids=[payload.conclusion_node_id],
+            edge_type_sequence=["supports"],
+            max_paths=payload.max_chains,
+        )
+        return {
+            "workspace_id": workspace,
+            "support_chains": result["path_evidence"],
+            "nodes": result["nodes"],
+            "edges": result["edges"],
+            "trace_refs": result["trace_refs"],
+        }
+
+    @post(
+        "/graph/{workspace_id}/predicted-links",
+        response_model=dict[str, object],
+        responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    )
+    async def get_graph_predicted_links(
+        self, workspace_id: str, request: Request
+    ) -> dict[str, object]:
+        workspace = validate_workspace_id(workspace_id)
+        payload = await parse_request_model(request, GraphPredictedLinksRequest)
+        self._ensure_payload_workspace(
+            path_workspace_id=workspace,
+            payload_workspace_id=payload.workspace_id,
+        )
+        result = self._query_service.predict_missing_edges(
+            workspace_id=workspace,
+            start_node_ids=[payload.node_id],
+            edge_type_sequence=["supports", "requires"],
+            predicted_edge_type="supports",
+            top_k=payload.top_k,
+        )
+        return {
+            "workspace_id": workspace,
+            "predicted_links": result["predictions"],
+            "path_evidence": result["path_evidence"],
+            "trace_refs": result["trace_refs"],
+        }
+
+    @post(
+        "/graph/{workspace_id}/deep-chains",
+        response_model=dict[str, object],
+        responses={400: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+    )
+    async def get_graph_deep_chains(
+        self, workspace_id: str, request: Request
+    ) -> dict[str, object]:
+        workspace = validate_workspace_id(workspace_id)
+        payload = await parse_request_model(request, GraphDeepChainsRequest)
+        self._ensure_payload_workspace(
+            path_workspace_id=workspace,
+            payload_workspace_id=payload.workspace_id,
+        )
+        result = self._query_service.query_logical_subgraph(
+            workspace_id=workspace,
+            seed_node_ids=[payload.node_id],
+            max_hops=3,
+            limit_nodes=64,
+            edge_type_sequence=["supports", "requires", "derives"],
+            path_limit=payload.max_chains,
+        )
+        return {
+            "workspace_id": workspace,
+            "deep_chains": result["path_evidence"],
+            "nodes": result["nodes"],
+            "edges": result["edges"],
+            "trace_refs": result["trace_refs"],
+        }
 
     @get(
         "/graph/{workspace_id}/export",

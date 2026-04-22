@@ -11,7 +11,12 @@ import {
   submitValidationResult,
   replayPackage,
   getErrorMessage,
+  getGraphSupportChains,
+  getGraphPredictedLinks,
+  getGraphDeepChains,
+  getGraphReport,
 } from './api';
+import { normalizeGraphInspectorPayloads } from './graph-inspector-helpers';
 
 function isJobTimeoutLike(error: unknown) {
   const code = String((error as any)?.envelope?.error_code || (error as any)?.error_code || '').toLowerCase();
@@ -46,6 +51,11 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [startPan, setStartPan] = useState({ x: 0, y: 0 });
+  const [inspectorState, setInspectorState] = useState<any>({
+    status: 'idle',
+    error: null,
+    data: null,
+  });
 
   useEffect(() => {
     if (initialNodes) {
@@ -69,6 +79,40 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     setSelNode(null);
     setIsEditingNode(false);
   }, [initialNodes, selNode?.node_id]);
+
+  useEffect(() => {
+    if (!selNode?.node_id) {
+      setInspectorState({ status: 'idle', error: null, data: null });
+      return;
+    }
+    let cancelled = false;
+    setInspectorState({ status: 'loading', error: null, data: null });
+    Promise.all([
+      getGraphSupportChains(workspaceId, selNode.node_id),
+      getGraphPredictedLinks(workspaceId, selNode.node_id),
+      getGraphDeepChains(workspaceId, selNode.node_id),
+      getGraphReport(workspaceId),
+    ])
+      .then(([supportChains, predictedLinks, deepChains, report]) => {
+        if (cancelled) return;
+        setInspectorState({
+          status: 'ready',
+          error: null,
+          data: normalizeGraphInspectorPayloads({ supportChains, predictedLinks, deepChains, report }),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setInspectorState({
+          status: 'error',
+          error: getErrorMessage(error),
+          data: null,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selNode?.node_id, workspaceId]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('.graph-node')) return;
@@ -412,6 +456,31 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     };
     return map[key] || type;
   };
+  const inspectorData = inspectorState.data;
+  const renderInsightItems = (items: any[], emptyText: string) => {
+    if (!items.length) return <div className="insight-empty">{emptyText}</div>;
+    return items.slice(0, 4).map((item: any, index: number) => {
+      const title =
+        item.title ||
+        item.path_id ||
+        item.chain_id ||
+        item.sourceNodeId ||
+        item.source_node_id ||
+        `结果 ${index + 1}`;
+      const detail =
+        item.predictedEdgeType
+          ? `${item.predictedEdgeType} · 置信度 ${Math.round(Number(item.confidence || 0) * 100)}%`
+          : item.edge_type_sequence
+          ? `链路：${item.edge_type_sequence.join(' → ')}`
+          : item.short_label || item.targetNodeId || item.target_node_id || '';
+      return (
+        <div className="insight-row" key={`${title}-${index}`}>
+          <div className="insight-row-title">{String(title)}</div>
+          {detail && <div className="insight-row-detail">{String(detail)}</div>}
+        </div>
+      );
+    });
+  };
   const hasActionableGraph = nodes.length > 1 && edges.length > 0;
   const canEnterEdgeMode = nodes.length >= 2;
   const canAutoLayout = nodes.length > 0;
@@ -516,6 +585,34 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
                     <div className="insp-section">
                       <div className="insp-sec-lbl">标签</div>
                       <div className="gn-tags">{selNode.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+                    </div>
+                    <div className="insp-section">
+                      <div className="insp-sec-lbl">图谱洞察</div>
+                      {inspectorState.status === 'loading' && <div className="insight-empty">正在读取支撑链、潜在连边和图谱报告...</div>}
+                      {inspectorState.status === 'error' && <div className="insight-error">读取失败：{inspectorState.error}</div>}
+                      {inspectorState.status === 'ready' && inspectorData && (
+                        <div className="insight-stack">
+                          <div className="insight-card">
+                            <div className="insight-title">支撑链</div>
+                            {renderInsightItems(inspectorData.supportChains, '暂无直接支撑链')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">潜在连边</div>
+                            {renderInsightItems(inspectorData.predictedLinks, '暂无高置信潜在连边')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">深层链条</div>
+                            {renderInsightItems(inspectorData.deepChains, '暂无深层链条')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">图谱报告</div>
+                            <div className="insight-row-detail">
+                              节点 {String(inspectorData.report.summary.node_count ?? 0)} · 连接 {String(inspectorData.report.summary.edge_count ?? 0)} ·
+                              悬空 {inspectorData.report.dangling_nodes.length}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </>
                 )}
