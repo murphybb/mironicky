@@ -34,3 +34,66 @@ def test_state_store_list_sources_is_workspace_scoped(tmp_path) -> None:
 
     assert len(items) == 2
     assert all(item["workspace_id"] == "ws_track1_a" for item in items)
+
+
+def test_state_store_list_workspaces_summarizes_non_empty_workspaces(tmp_path) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "research_workspaces.sqlite3"))
+    store.create_source(
+        workspace_id="ws_empty_default",
+        source_type="paper",
+        title="empty marker",
+        content="source only",
+        metadata={},
+        import_request_id="req_empty",
+    )
+    source_a = store.create_source(
+        workspace_id="ws_has_graph",
+        source_type="paper",
+        title="A",
+        content="content-a",
+        metadata={},
+        import_request_id="req_a",
+    )
+    source_b = store.create_source(
+        workspace_id="ws_has_source",
+        source_type="note",
+        title="B",
+        content="content-b",
+        metadata={},
+        import_request_id="req_b",
+    )
+    first = store.create_graph_node(
+        workspace_id="ws_has_graph",
+        node_type="evidence",
+        object_ref_type="source",
+        object_ref_id=str(source_a["source_id"]),
+        short_label="Evidence",
+        full_description="Evidence node",
+    )
+    second = store.create_graph_node(
+        workspace_id="ws_has_graph",
+        node_type="conclusion",
+        object_ref_type="source",
+        object_ref_id=str(source_a["source_id"]),
+        short_label="Conclusion",
+        full_description="Conclusion node",
+    )
+    store.create_graph_edge(
+        workspace_id="ws_has_graph",
+        source_node_id=str(first["node_id"]),
+        target_node_id=str(second["node_id"]),
+        edge_type="supports",
+        object_ref_type="manual_link",
+        object_ref_id="edge-a",
+        strength=0.9,
+    )
+
+    items = store.list_workspaces()
+
+    by_id = {str(item["workspace_id"]): item for item in items}
+    assert by_id["ws_has_graph"]["source_count"] == 1
+    assert by_id["ws_has_graph"]["node_count"] == 2
+    assert by_id["ws_has_graph"]["edge_count"] == 1
+    assert by_id["ws_has_graph"]["updated_at"] is not None
+    assert by_id["ws_has_source"]["source_count"] == 1
+    assert str(source_b["workspace_id"]) in by_id

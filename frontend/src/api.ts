@@ -148,6 +148,16 @@ export interface SourceRecord {
   updated_at?: string;
 }
 
+export interface WorkspaceSummaryRecord {
+  workspace_id: string;
+  source_count: number;
+  candidate_count: number;
+  node_count: number;
+  edge_count: number;
+  route_count: number;
+  updated_at?: string | null;
+}
+
 export interface JobStatusResponse {
   job_id: string;
   job_type: string;
@@ -657,6 +667,43 @@ export async function getGraph(workspaceId: string): Promise<GraphResponse> {
   return normalizeGraph(data);
 }
 
+export async function getGraphSupportChains(workspaceId: string, conclusionNodeId: string, maxChains = 5) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/support-chains`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      conclusion_node_id: conclusionNodeId,
+      max_chains: maxChains,
+    },
+  });
+}
+
+export async function getGraphPredictedLinks(workspaceId: string, nodeId: string, topK = 8) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/predicted-links`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      node_id: nodeId,
+      top_k: topK,
+    },
+  });
+}
+
+export async function getGraphDeepChains(workspaceId: string, nodeId: string, maxChains = 5) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/deep-chains`, {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      node_id: nodeId,
+      max_chains: maxChains,
+    },
+  });
+}
+
+export async function getGraphReport(workspaceId: string) {
+  return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/report`);
+}
+
 export async function listVersions(workspaceId?: string) {
   const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
   return request<ListResponse<any>>(`/api/v1/research/versions${query}`);
@@ -675,6 +722,10 @@ export async function listCandidates(workspaceId: string): Promise<ListResponse<
 
 export async function listSources(workspaceId: string): Promise<ListResponse<SourceRecord>> {
   return request<ListResponse<SourceRecord>>(`/api/v1/research/sources?workspace_id=${encodeURIComponent(workspaceId)}`);
+}
+
+export async function listWorkspaces(): Promise<ListResponse<WorkspaceSummaryRecord>> {
+  return request<ListResponse<WorkspaceSummaryRecord>>('/api/v1/research/workspaces');
 }
 
 export async function confirmCandidates(workspaceId: string, candidateIds: string[]) {

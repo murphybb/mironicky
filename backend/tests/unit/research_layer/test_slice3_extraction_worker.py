@@ -19,6 +19,24 @@ def _build_store(tmp_path) -> ResearchApiStateStore:
     return ResearchApiStateStore(db_path=str(db_path))
 
 
+def test_extraction_worker_default_llm_timeout_is_five_minutes(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("RESEARCH_SOURCE_EXTRACT_LLM_TIMEOUT_SECONDS", raising=False)
+
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    assert worker._resolve_llm_timeout_seconds() == 300.0
+
+
+def test_extraction_worker_default_output_budget_handles_prompt_b_json(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("RESEARCH_SOURCE_EXTRACT_MAX_OUTPUT_TOKENS", raising=False)
+
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    assert worker._resolve_output_max_tokens() == 12000
+
+
 def _build_long_source_content() -> str:
     return " ".join(f"Sentence {index:04d}." for index in range(32))
 
@@ -84,8 +102,8 @@ async def test_extraction_worker_limits_prompt_window_and_output_tokens(
                 request_id=str(kwargs["request_id"]),
                 llm_response_id="resp_slice3_extract_limit",
                 usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
-                raw_text='{"candidates":[]}',
-                parsed_json={"candidates": []},
+                raw_text='{"units":[]}',
+                parsed_json={"units": []},
                 fallback_used=False,
                 degraded=False,
                 degraded_reason=None,

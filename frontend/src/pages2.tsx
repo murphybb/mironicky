@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState, useEffect } from 'react';
+﻿import React, { useMemo, useState, useEffect, useRef } from 'react';
 import {
   createGraphNode,
   createGraphEdge,
@@ -11,7 +11,19 @@ import {
   submitValidationResult,
   replayPackage,
   getErrorMessage,
+  getGraphSupportChains,
+  getGraphPredictedLinks,
+  getGraphDeepChains,
+  getGraphReport,
 } from './api';
+import { normalizeGraphInspectorPayloads } from './graph-inspector-helpers';
+import {
+  clampZoom,
+  computeClusteredLayout,
+  getSelectionFocus,
+  loadPinnedPositions,
+  savePinnedPositions,
+} from './workbench-graph-layout';
 
 function isJobTimeoutLike(error: unknown) {
   const code = String((error as any)?.envelope?.error_code || (error as any)?.error_code || '').toLowerCase();
@@ -43,46 +55,143 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   const [editLabel, setEditLabel] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editTags, setEditTags] = useState('');
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const [startPan, setStartPan] = useState({ x: 0, y: 0 });
+  const [pinnedPositions, setPinnedPositions] = useState<Record<string, { x: number; y: number }>>(() =>
+    loadPinnedPositions(workspaceId)
+  );
+  const [draggedNode, setDraggedNode] = useState<any>(null);
+  const nodeDragMovedRef = useRef(false);
+  const [inspectorState, setInspectorState] = useState<any>({
+    status: 'idle',
+    error: null,
+    data: null,
+  });
+
+  useEffect(() => {
+    setPinnedPositions(loadPinnedPositions(workspaceId));
+  }, [workspaceId]);
 
   useEffect(() => {
     if (initialNodes) {
+      const normalizedNodes = initialNodes.map((node: any) => ({
+        ...node,
+        node_type: normalizeNodeType(node?.node_type),
+      }));
+      const layout = computeClusteredLayout(normalizedNodes, initialEdges || [], pinnedPositions);
       setNodes(
-        initialNodes.map((node: any) => ({
+        normalizedNodes.map((node: any) => ({
           ...node,
-          node_type: normalizeNodeType(node?.node_type),
+          x: layout[node.node_id]?.x ?? Number(node.x || 0),
+          y: layout[node.node_id]?.y ?? Number(node.y || 0),
         }))
       );
     }
     if (initialEdges) setEdges(initialEdges);
-  }, [initialNodes, initialEdges]);
+  }, [initialNodes, initialEdges, pinnedPositions]);
 
   useEffect(() => {
     if (!selNode?.node_id) return;
-    const latest = (initialNodes || []).find((node: any) => node.node_id === selNode.node_id);
+    const latest = (nodes || []).find((node: any) => node.node_id === selNode.node_id);
     if (latest) {
       setSelNode({ ...latest, node_type: normalizeNodeType(latest?.node_type) });
       return;
     }
     setSelNode(null);
     setIsEditingNode(false);
-  }, [initialNodes, selNode?.node_id]);
+  }, [nodes, selNode?.node_id]);
+
+  useEffect(() => {
+    if (!selNode?.node_id) {
+      setInspectorState({ status: 'idle', error: null, data: null });
+      return;
+    }
+    let cancelled = false;
+    setInspectorState({ status: 'loading', error: null, data: null });
+    Promise.all([
+      getGraphSupportChains(workspaceId, selNode.node_id),
+      getGraphPredictedLinks(workspaceId, selNode.node_id),
+      getGraphDeepChains(workspaceId, selNode.node_id),
+      getGraphReport(workspaceId),
+    ])
+      .then(([supportChains, predictedLinks, deepChains, report]) => {
+        if (cancelled) return;
+        setInspectorState({
+          status: 'ready',
+          error: null,
+          data: normalizeGraphInspectorPayloads({ supportChains, predictedLinks, deepChains, report }),
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setInspectorState({
+          status: 'error',
+          error: getErrorMessage(error),
+          data: null,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selNode?.node_id, workspaceId]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('.graph-node')) return;
     setIsDragging(true);
-    setStartPan({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    setStartPan({ x: e.clientX - viewport.x, y: e.clientY - viewport.y });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (draggedNode) {
+      const nextX = draggedNode.startX + (e.clientX - draggedNode.startClientX) / viewport.scale;
+      const nextY = draggedNode.startY + (e.clientY - draggedNode.startClientY) / viewport.scale;
+      nodeDragMovedRef.current =
+        nodeDragMovedRef.current ||
+        Math.abs(e.clientX - draggedNode.startClientX) > 3 ||
+        Math.abs(e.clientY - draggedNode.startClientY) > 3;
+      setDraggedNode({ ...draggedNode, currentX: nextX, currentY: nextY });
+      setNodes((prev: any[]) =>
+        prev.map((node: any) => (node.node_id === draggedNode.nodeId ? { ...node, x: nextX, y: nextY } : node))
+      );
+      return;
+    }
     if (!isDragging) return;
-    setPan({ x: e.clientX - startPan.x, y: e.clientY - startPan.y });
+    setViewport((prev) => ({ ...prev, x: e.clientX - startPan.x, y: e.clientY - startPan.y }));
   };
 
   const handleMouseUp = () => {
+    if (draggedNode) {
+      const nextPinned = {
+        ...pinnedPositions,
+        [draggedNode.nodeId]: {
+          x: draggedNode.currentX ?? draggedNode.startX,
+          y: draggedNode.currentY ?? draggedNode.startY,
+        },
+      };
+      setPinnedPositions(savePinnedPositions(workspaceId, nextPinned));
+      setDraggedNode(null);
+    }
     setIsDragging(false);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    setViewport((prev) => ({ ...prev, scale: clampZoom(prev.scale, e.deltaY) }));
+  };
+
+  const handleNodeMouseDown = (e: React.MouseEvent, node: any) => {
+    if (e.button !== 0 || isEdgeMode) return;
+    e.stopPropagation();
+    nodeDragMovedRef.current = false;
+    setDraggedNode({
+      nodeId: node.node_id,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      startX: Number(node.x || 0),
+      startY: Number(node.y || 0),
+      currentX: Number(node.x || 0),
+      currentY: Number(node.y || 0),
+    });
   };
 
   const addNode = () => {
@@ -169,6 +278,10 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   };
 
   const handleNodeClick = async (node: any) => {
+    if (nodeDragMovedRef.current) {
+      nodeDragMovedRef.current = false;
+      return;
+    }
     if (!isEdgeMode) {
       setSelNode(node);
       setIsEditingNode(false);
@@ -359,33 +472,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
       return;
     }
 
-    const typeOrder: Record<string, number> = {
-      c: 0,
-      conclusion: 0,
-      e: 1,
-      evidence: 1,
-      a: 2,
-      assumption: 2,
-      conflict: 3,
-      f: 4,
-      failure: 4,
-      g: 5,
-      validation: 5,
-      gap: 5,
-    };
-    const sorted = [...nodes].sort((a: any, b: any) => {
-      const ta = typeOrder[a?.node_type] ?? 9;
-      const tb = typeOrder[b?.node_type] ?? 9;
-      if (ta !== tb) return ta - tb;
-      return String(a?.short_label ?? '').localeCompare(String(b?.short_label ?? ''), 'zh-Hans-CN');
-    });
-
-    const next = sorted.map((node: any, index: number) => ({
+    const layout = computeClusteredLayout(nodes, edges, {});
+    const next = nodes.map((node: any) => ({
       ...node,
-      x: 120 + (index % 4) * 220,
-      y: 80 + Math.floor(index / 4) * 170,
+      x: layout[node.node_id]?.x ?? node.x,
+      y: layout[node.node_id]?.y ?? node.y,
     }));
 
+    setPinnedPositions(savePinnedPositions(workspaceId, {}));
     setNodes(next);
     if (selNode?.node_id) {
       const mapped = next.find((node: any) => node.node_id === selNode.node_id);
@@ -412,9 +506,38 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     };
     return map[key] || type;
   };
+  const inspectorData = inspectorState.data;
+  const renderInsightItems = (items: any[], emptyText: string) => {
+    if (!items.length) return <div className="insight-empty">{emptyText}</div>;
+    return items.slice(0, 4).map((item: any, index: number) => {
+      const title =
+        item.title ||
+        item.path_id ||
+        item.chain_id ||
+        item.sourceNodeId ||
+        item.source_node_id ||
+        `结果 ${index + 1}`;
+      const detail =
+        item.predictedEdgeType
+          ? `${item.predictedEdgeType} · 置信度 ${Math.round(Number(item.confidence || 0) * 100)}%`
+          : item.edge_type_sequence
+          ? `链路：${item.edge_type_sequence.join(' → ')}`
+          : item.short_label || item.targetNodeId || item.target_node_id || '';
+      return (
+        <div className="insight-row" key={`${title}-${index}`}>
+          <div className="insight-row-title">{String(title)}</div>
+          {detail && <div className="insight-row-detail">{String(detail)}</div>}
+        </div>
+      );
+    });
+  };
   const hasActionableGraph = nodes.length > 1 && edges.length > 0;
   const canEnterEdgeMode = nodes.length >= 2;
   const canAutoLayout = nodes.length > 0;
+  const selectionFocus = useMemo(
+    () => getSelectionFocus(selNode?.node_id, edges),
+    [selNode?.node_id, edges]
+  );
   const pendingEdgeSourceNode = pendingEdgeSourceId
     ? nodes.find((node: any) => node.node_id === pendingEdgeSourceId)
     : null;
@@ -438,40 +561,59 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
+          onWheel={handleWheel}
           style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
         >
-          <div className="canvas-bg" style={{ backgroundPosition: `${pan.x}px ${pan.y}px` }}></div>
-          <div style={{ transform: `translate(${pan.x}px, ${pan.y}px)`, width: '100%', height: '100%', position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          <div className="zoom-hud">{Math.round(viewport.scale * 100)}%</div>
+          <div className="canvas-bg" style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px` }}></div>
+          <div style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: '0 0', width: '100%', height: '100%', position: 'absolute', inset: 0, pointerEvents: 'none' }}>
             <svg className="edges" style={{ pointerEvents: 'none' }}>
               {edges.map((e: any, i: number) => {
                 const s = nodes.find((n: any) => n.node_id === e.source_node_id);
                 const t = nodes.find((n: any) => n.node_id === e.target_node_id);
                 if (!s || !t) return null;
+                const edgeKey = `${String(e.source_node_id || '')}->${String(e.target_node_id || '')}#${i}`;
+                const hasSelection = Boolean(selNode?.node_id);
+                const isFocusedEdge = selectionFocus.connectedEdgeKeys.has(edgeKey);
                 const x1 = s.x + 90;
                 const y1 = s.y + 60;
                 const x2 = t.x + 90;
                 const y2 = t.y;
                 const my = (y1 + y2) / 2;
                 return (
-                  <path key={i} d={`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`} fill="none" stroke={edgeColors[e.edge_type]} strokeWidth="2" strokeDasharray={e.edge_type === 'gaps' ? '4 4' : 'none'} />
+                  <path
+                    key={edgeKey}
+                    className={`edge-path ${isFocusedEdge ? 'edge-active' : ''} ${hasSelection && !isFocusedEdge ? 'edge-muted' : ''}`}
+                    d={`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`}
+                    fill="none"
+                    stroke={isFocusedEdge ? 'var(--accent-strong)' : edgeColors[e.edge_type]}
+                    strokeWidth={isFocusedEdge ? '4' : '2'}
+                    strokeDasharray={e.edge_type === 'gaps' ? '4 4' : 'none'}
+                  />
                 );
               })}
             </svg>
             <div className="wb-canvas" style={{ pointerEvents: 'auto' }}>
-              {nodes.map((n: any) => (
-                <div
-                  key={n.node_id}
-                  className={`graph-node gn-${n.node_type} ${selNode?.node_id === n.node_id ? 'sel' : ''} ${pendingEdgeSourceId === n.node_id ? 'sel' : ''}`}
-                  style={{ left: n.x, top: n.y }}
-                  onClick={() => handleNodeClick(n)}
-                >
-                  <div className="gn-inner">
-                    <div className="gn-type">{getTypeLbl(n.node_type)}</div>
-                    <div className="gn-label">{n.short_label}</div>
-                    <div className="gn-tags">{n.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+              {nodes.map((n: any) => {
+                const isSelected = selNode?.node_id === n.node_id || pendingEdgeSourceId === n.node_id;
+                const hasSelection = Boolean(selNode?.node_id);
+                const isRelated = selectionFocus.connectedNodeIds.has(n.node_id);
+                return (
+                  <div
+                    key={n.node_id}
+                    className={`graph-node gn-${n.node_type} ${isSelected ? 'sel' : ''} ${isRelated ? 'related' : ''} ${hasSelection && !isSelected && !isRelated ? 'muted' : ''}`}
+                    style={{ left: n.x, top: n.y }}
+                    onMouseDown={(event) => handleNodeMouseDown(event, n)}
+                    onClick={() => handleNodeClick(n)}
+                  >
+                    <div className="gn-inner">
+                      <div className="gn-type">{getTypeLbl(n.node_type)}</div>
+                      <div className="gn-label">{n.short_label}</div>
+                      <div className="gn-tags">{n.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -516,6 +658,34 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
                     <div className="insp-section">
                       <div className="insp-sec-lbl">标签</div>
                       <div className="gn-tags">{selNode.short_tags?.map((t: string) => <div key={t} className="gn-tag">{t}</div>)}</div>
+                    </div>
+                    <div className="insp-section">
+                      <div className="insp-sec-lbl">图谱洞察</div>
+                      {inspectorState.status === 'loading' && <div className="insight-empty">正在读取支撑链、潜在连边和图谱报告...</div>}
+                      {inspectorState.status === 'error' && <div className="insight-error">读取失败：{inspectorState.error}</div>}
+                      {inspectorState.status === 'ready' && inspectorData && (
+                        <div className="insight-stack">
+                          <div className="insight-card">
+                            <div className="insight-title">支撑链</div>
+                            {renderInsightItems(inspectorData.supportChains, '暂无直接支撑链')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">潜在连边</div>
+                            {renderInsightItems(inspectorData.predictedLinks, '暂无高置信潜在连边')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">深层链条</div>
+                            {renderInsightItems(inspectorData.deepChains, '暂无深层链条')}
+                          </div>
+                          <div className="insight-card">
+                            <div className="insight-title">图谱报告</div>
+                            <div className="insight-row-detail">
+                              节点 {String(inspectorData.report.summary.node_count ?? 0)} · 连接 {String(inspectorData.report.summary.edge_count ?? 0)} ·
+                              悬空 {inspectorData.report.dangling_nodes.length}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </>
                 )}

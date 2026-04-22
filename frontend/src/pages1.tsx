@@ -13,6 +13,7 @@ import {
   pollJob,
   getErrorMessage,
 } from './api';
+import { getCandidateBulkConfirmDialogCopy } from './candidate-bulk-actions-helpers';
 
 function formatDate(value?: string) {
   if (!value) return '';
@@ -668,7 +669,7 @@ export function ImportPage({ goto, showToast, workspaceId, onImportCompleted, on
     if (acceptedJob?.job_id) {
       try {
         // PDF/长文本抽取通常超 20s，放宽前端轮询窗口避免“假超时”。
-        finishedJob = await pollJob(acceptedJob.job_id, 240000, 1800);
+        finishedJob = await pollJob(acceptedJob.job_id, 300000, 1800);
       } catch (error) {
         pollErrorEnvelope = (error as any)?.envelope || { message: getErrorMessage(error) };
         try {
@@ -1076,6 +1077,7 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
   const [pollRefreshCount, setPollRefreshCount] = useState(0);
   const [lastPollAt, setLastPollAt] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmAllDialog, setConfirmAllDialog] = useState<{ count: number } | null>(null);
   const fetchDataRef = useRef(fetchData);
 
   useEffect(() => {
@@ -1304,27 +1306,43 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
       }
 
       if (action === 'acc') {
-        const { confirmedIds, skippedConflictIds, alreadyHandledIds } = await confirmCandidatesWithConflictTolerance(pendingIds);
-        if (confirmedIds.length > 0) {
-          const confirmedPendingCandidates = pending
-            .filter((item: any) => confirmedIds.includes(String(item.candidate_id)))
-            .map((item: any) => ({ ...item, status: 'confirmed' }));
-          await hydrateConfirmedCandidatesToGraph(workspaceId, confirmedPendingCandidates);
-        }
-        await fetchData();
-        if (skippedConflictIds.length > 0) {
-          showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条，跳过重复 ${skippedConflictIds.length} 条`);
-        } else if (alreadyHandledIds.length > 0) {
-          showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条`);
-        } else {
-          showToast('全部节点已确认入图');
-        }
-        if (confirmedIds.length > 0) goto('workbench');
+        setConfirmAllDialog({ count: pendingIds.length });
       } else {
         await rejectCandidates(workspaceId, pendingIds, '用户全部拒绝');
         await fetchData();
         showToast('全部节点已拒绝');
       }
+    } catch (error) {
+      showToast(getErrorMessage(error));
+    }
+  };
+
+  const confirmAllPending = async () => {
+    const pendingIds = pending.map((c: any) => c.candidate_id);
+    if (pendingIds.length === 0) {
+      setConfirmAllDialog(null);
+      showToast('当前没有待确认候选');
+      return;
+    }
+
+    try {
+      const { confirmedIds, skippedConflictIds, alreadyHandledIds } = await confirmCandidatesWithConflictTolerance(pendingIds);
+      if (confirmedIds.length > 0) {
+        const confirmedPendingCandidates = pending
+          .filter((item: any) => confirmedIds.includes(String(item.candidate_id)))
+          .map((item: any) => ({ ...item, status: 'confirmed' }));
+        await hydrateConfirmedCandidatesToGraph(workspaceId, confirmedPendingCandidates);
+      }
+      await fetchData();
+      setConfirmAllDialog(null);
+      if (skippedConflictIds.length > 0) {
+        showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条，跳过重复 ${skippedConflictIds.length} 条`);
+      } else if (alreadyHandledIds.length > 0) {
+        showToast(`已确认 ${confirmedIds.length} 条，已处理 ${alreadyHandledIds.length} 条`);
+      } else {
+        showToast('全部节点已确认入图');
+      }
+      if (confirmedIds.length > 0) goto('workbench');
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -1375,6 +1393,8 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
     }
   };
 
+  const confirmAllDialogCopy = confirmAllDialog ? getCandidateBulkConfirmDialogCopy(confirmAllDialog.count) : null;
+
   return (
     <div className="confirm-layout">
       <div className="confirm-bar">
@@ -1389,6 +1409,49 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
           <button className="btn btn-p" onClick={() => handleAll('acc')} disabled={pending.length === 0} title={pending.length === 0 ? '当前没有待确认候选可全部确认' : undefined}>全部确认</button>
         </div>
       </div>
+      {confirmAllDialogCopy ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="candidate-bulk-confirm-title"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(15, 23, 42, 0.42)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              width: 'min(440px, 100%)',
+              background: 'var(--bg)',
+              border: '1px solid var(--border)',
+              borderRadius: '12px',
+              boxShadow: '0 24px 48px rgba(15, 23, 42, 0.18)',
+              padding: '20px',
+            }}
+          >
+            <div id="candidate-bulk-confirm-title" style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text)' }}>
+              {confirmAllDialogCopy.title}
+            </div>
+            <div style={{ marginTop: '8px', fontSize: '13px', lineHeight: 1.7, color: 'var(--text2)' }}>
+              {confirmAllDialogCopy.body}
+            </div>
+            <div style={{ marginTop: '18px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button className="btn" onClick={() => setConfirmAllDialog(null)}>
+                {confirmAllDialogCopy.cancelLabel}
+              </button>
+              <button className="btn btn-p" onClick={confirmAllPending}>
+                {confirmAllDialogCopy.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="confirm-body" id="cand-list">
         {extractionContext && (
           <div className="cand-card" style={{ borderStyle: 'dashed' }}>

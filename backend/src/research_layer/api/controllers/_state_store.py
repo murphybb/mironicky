@@ -206,9 +206,12 @@ class ResearchApiStateStore:
                 workspace_id TEXT NOT NULL,
                 source_id TEXT NOT NULL,
                 candidate_type TEXT NOT NULL,
+                semantic_type TEXT,
                 text TEXT NOT NULL,
                 status TEXT NOT NULL,
                 source_span_json TEXT NOT NULL,
+                quote TEXT,
+                trace_refs_json TEXT,
                 candidate_batch_id TEXT,
                 extraction_job_id TEXT,
                 extractor_name TEXT,
@@ -315,6 +318,42 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS research_conclusions (
+                conclusion_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                candidate_id TEXT NOT NULL UNIQUE,
+                source_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                source_span_json TEXT NOT NULL,
+                semantic_type TEXT,
+                quote TEXT,
+                trace_refs_json TEXT,
+                candidate_batch_id TEXT,
+                extraction_job_id TEXT,
+                created_at TEXT NOT NULL,
+                created_request_id TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS research_gaps (
+                gap_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                candidate_id TEXT NOT NULL UNIQUE,
+                source_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                source_span_json TEXT NOT NULL,
+                semantic_type TEXT,
+                quote TEXT,
+                trace_refs_json TEXT,
+                candidate_batch_id TEXT,
+                extraction_job_id TEXT,
+                created_at TEXT NOT NULL,
+                created_request_id TEXT
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS research_conflicts (
                 conflict_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -372,6 +411,23 @@ class ResearchApiStateStore:
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS relation_candidates (
+                relation_candidate_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                candidate_batch_id TEXT,
+                extraction_job_id TEXT,
+                source_candidate_id TEXT,
+                target_candidate_id TEXT,
+                semantic_relation_type TEXT,
+                relation_type TEXT,
+                relation_status TEXT NOT NULL,
+                quote TEXT,
+                trace_refs_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """,
             """
@@ -775,6 +831,9 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "candidates", "candidate_batch_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extraction_job_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extractor_name", "TEXT")
+                self._ensure_column(conn, "candidates", "semantic_type", "TEXT")
+                self._ensure_column(conn, "candidates", "quote", "TEXT")
+                self._ensure_column(conn, "candidates", "trace_refs_json", "TEXT")
                 self._ensure_column(
                     conn, "candidates", "provider_backend", "TEXT"
                 )
@@ -867,6 +926,18 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "graph_edges", "object_ref_id", "TEXT")
                 self._ensure_column(conn, "graph_edges", "created_at", "TEXT")
                 self._ensure_column(conn, "graph_edges", "updated_at", "TEXT")
+                for table_name in (
+                    "research_evidences",
+                    "research_assumptions",
+                    "research_conclusions",
+                    "research_gaps",
+                    "research_conflicts",
+                    "research_failures",
+                    "research_validations",
+                ):
+                    self._ensure_column(conn, table_name, "semantic_type", "TEXT")
+                    self._ensure_column(conn, table_name, "quote", "TEXT")
+                    self._ensure_column(conn, table_name, "trace_refs_json", "TEXT")
                 self._ensure_column(conn, "graph_versions", "created_at", "TEXT")
                 self._ensure_column(conn, "graph_versions", "request_id", "TEXT")
                 self._ensure_column(conn, "hypotheses", "title", "TEXT")
@@ -991,9 +1062,12 @@ class ResearchApiStateStore:
             "routes",
             "research_evidences",
             "research_assumptions",
+            "research_conclusions",
+            "research_gaps",
             "research_conflicts",
             "research_failures",
             "research_validations",
+            "relation_candidates",
             "graph_nodes",
             "graph_edges",
             "graph_versions",
@@ -1138,6 +1212,91 @@ class ResearchApiStateStore:
                 items.append(source)
         return items
 
+    def list_workspaces(self) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            """
+            WITH workspace_ids AS (
+                SELECT workspace_id FROM sources
+                UNION
+                SELECT workspace_id FROM candidates
+                UNION
+                SELECT workspace_id FROM graph_nodes
+                UNION
+                SELECT workspace_id FROM graph_edges
+                UNION
+                SELECT workspace_id FROM routes
+            ),
+            source_counts AS (
+                SELECT workspace_id, COUNT(*) AS source_count
+                FROM sources
+                GROUP BY workspace_id
+            ),
+            candidate_counts AS (
+                SELECT workspace_id, COUNT(*) AS candidate_count
+                FROM candidates
+                GROUP BY workspace_id
+            ),
+            node_counts AS (
+                SELECT workspace_id, COUNT(*) AS node_count
+                FROM graph_nodes
+                GROUP BY workspace_id
+            ),
+            edge_counts AS (
+                SELECT workspace_id, COUNT(*) AS edge_count
+                FROM graph_edges
+                GROUP BY workspace_id
+            ),
+            route_counts AS (
+                SELECT workspace_id, COUNT(*) AS route_count
+                FROM routes
+                GROUP BY workspace_id
+            ),
+            updates AS (
+                SELECT workspace_id, MAX(updated_at) AS updated_at
+                FROM (
+                    SELECT workspace_id, updated_at FROM sources
+                    UNION ALL
+                    SELECT workspace_id, updated_at FROM graph_nodes
+                    UNION ALL
+                    SELECT workspace_id, updated_at FROM graph_edges
+                )
+                GROUP BY workspace_id
+            )
+            SELECT
+                w.workspace_id,
+                COALESCE(s.source_count, 0) AS source_count,
+                COALESCE(c.candidate_count, 0) AS candidate_count,
+                COALESCE(n.node_count, 0) AS node_count,
+                COALESCE(e.edge_count, 0) AS edge_count,
+                COALESCE(r.route_count, 0) AS route_count,
+                u.updated_at AS updated_at
+            FROM workspace_ids w
+            LEFT JOIN source_counts s ON s.workspace_id = w.workspace_id
+            LEFT JOIN candidate_counts c ON c.workspace_id = w.workspace_id
+            LEFT JOIN node_counts n ON n.workspace_id = w.workspace_id
+            LEFT JOIN edge_counts e ON e.workspace_id = w.workspace_id
+            LEFT JOIN route_counts r ON r.workspace_id = w.workspace_id
+            LEFT JOIN updates u ON u.workspace_id = w.workspace_id
+            ORDER BY u.updated_at DESC NULLS LAST, w.workspace_id ASC
+            """
+        )
+        return [
+            {
+                "workspace_id": row["workspace_id"],
+                "source_count": int(row["source_count"] or 0),
+                "candidate_count": int(row["candidate_count"] or 0),
+                "node_count": int(row["node_count"] or 0),
+                "edge_count": int(row["edge_count"] or 0),
+                "route_count": int(row["route_count"] or 0),
+                "updated_at": (
+                    self._from_iso(row["updated_at"])
+                    if row["updated_at"] is not None
+                    else None
+                ),
+            }
+            for row in rows
+        ]
+
     def list_source_topic_clusters(self, *, workspace_id: str) -> list[dict[str, object]]:
         rows = self._fetchall(
             """
@@ -1249,9 +1408,12 @@ class ResearchApiStateStore:
             "workspace_id": row["workspace_id"],
             "source_id": row["source_id"],
             "candidate_type": row["candidate_type"],
+            "semantic_type": row["semantic_type"],
             "text": row["text"],
             "status": row["status"],
             "source_span": self._loads(row["source_span_json"]),
+            "quote": row["quote"],
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
             "candidate_batch_id": row["candidate_batch_id"],
             "extraction_job_id": row["extraction_job_id"],
             "extractor_name": row["extractor_name"],
@@ -1310,20 +1472,23 @@ class ResearchApiStateStore:
             self._execute(
                 """
                 INSERT INTO candidates (
-                    candidate_id, workspace_id, source_id, candidate_type, text, status,
-                    source_span_json, candidate_batch_id, extraction_job_id, extractor_name, reject_reason,
+                    candidate_id, workspace_id, source_id, candidate_type, semantic_type, text, status,
+                    source_span_json, quote, trace_refs_json, candidate_batch_id, extraction_job_id, extractor_name, reject_reason,
                     provider_backend, provider_model, llm_request_id, llm_response_id, usage_json, fallback_used, degraded, degraded_reason
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_id,
                     workspace_id,
                     source_id,
                     candidate["candidate_type"],
+                    candidate.get("semantic_type"),
                     candidate["text"],
                     "pending",
                     self._dumps(candidate["source_span"]),
+                    candidate.get("quote"),
+                    self._dumps(candidate.get("trace_refs") or {}),
                     candidate_batch_id,
                     job_id,
                     candidate["extractor_name"],
@@ -1383,6 +1548,111 @@ class ResearchApiStateStore:
             ),
         )
         return created
+
+    def add_relation_candidates_to_batch(
+        self,
+        *,
+        candidate_batch_id: str,
+        workspace_id: str,
+        source_id: str,
+        job_id: str,
+        relations: list[dict[str, object]],
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        created: list[dict[str, object]] = []
+        for relation in relations:
+            relation_candidate_id = self.gen_id("relcand")
+            self._execute(
+                """
+                INSERT INTO relation_candidates (
+                    relation_candidate_id, workspace_id, source_id, candidate_batch_id, extraction_job_id,
+                    source_candidate_id, target_candidate_id, semantic_relation_type, relation_type,
+                    relation_status, quote, trace_refs_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    relation_candidate_id,
+                    workspace_id,
+                    source_id,
+                    candidate_batch_id,
+                    job_id,
+                    relation.get("source_candidate_id"),
+                    relation.get("target_candidate_id"),
+                    relation.get("semantic_relation_type"),
+                    relation.get("relation_type"),
+                    str(relation.get("relation_status") or "unresolved"),
+                    relation.get("quote"),
+                    self._dumps(relation.get("trace_refs") or {}),
+                    self._to_iso(self.now()),
+                ),
+                conn=conn,
+            )
+            loaded = self.get_relation_candidate(relation_candidate_id, conn=conn)
+            if loaded is not None:
+                created.append(loaded)
+        return created
+
+    def get_relation_candidate(
+        self,
+        relation_candidate_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM relation_candidates WHERE relation_candidate_id = ?",
+            (relation_candidate_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return {
+            "relation_candidate_id": row["relation_candidate_id"],
+            "workspace_id": row["workspace_id"],
+            "source_id": row["source_id"],
+            "candidate_batch_id": row["candidate_batch_id"],
+            "extraction_job_id": row["extraction_job_id"],
+            "source_candidate_id": row["source_candidate_id"],
+            "target_candidate_id": row["target_candidate_id"],
+            "semantic_relation_type": row["semantic_relation_type"],
+            "relation_type": row["relation_type"],
+            "relation_status": row["relation_status"],
+            "quote": row["quote"],
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
+            "created_at": self._from_iso(row["created_at"]),
+        }
+
+    def list_relation_candidates(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str | None = None,
+        candidate_batch_id: str | None = None,
+        relation_status: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        sql = "SELECT relation_candidate_id FROM relation_candidates WHERE workspace_id = ?"
+        params: list[object] = [workspace_id]
+        if source_id is not None:
+            sql += " AND source_id = ?"
+            params.append(source_id)
+        if candidate_batch_id is not None:
+            sql += " AND candidate_batch_id = ?"
+            params.append(candidate_batch_id)
+        if relation_status is not None:
+            sql += " AND relation_status = ?"
+            params.append(relation_status)
+        sql += " ORDER BY created_at ASC, relation_candidate_id ASC"
+        rows = self._fetchall(sql, tuple(params), conn=conn)
+        results: list[dict[str, object]] = []
+        for row in rows:
+            relation = self.get_relation_candidate(
+                str(row["relation_candidate_id"]),
+                conn=conn,
+            )
+            if relation is not None:
+                results.append(relation)
+        return results
 
     def fail_candidate_batch(
         self, *, candidate_batch_id: str, error: dict[str, object]
@@ -1530,9 +1800,12 @@ class ResearchApiStateStore:
                 "workspace_id": row["workspace_id"],
                 "source_id": row["source_id"],
                 "candidate_type": row["candidate_type"],
+                "semantic_type": row["semantic_type"],
                 "text": row["text"],
                 "status": row["status"],
                 "source_span": self._loads(row["source_span_json"]),
+                "quote": row["quote"],
+                "trace_refs": self._loads_dict(row["trace_refs_json"]),
                 "candidate_batch_id": row["candidate_batch_id"],
                 "extraction_job_id": row["extraction_job_id"],
                 "extractor_name": row["extractor_name"],
@@ -1574,6 +1847,8 @@ class ResearchApiStateStore:
         queries = [
             ("evidence", "research_evidences", "evidence_id"),
             ("assumption", "research_assumptions", "assumption_id"),
+            ("conclusion", "research_conclusions", "conclusion_id"),
+            ("gap", "research_gaps", "gap_id"),
             ("conflict", "research_conflicts", "conflict_id"),
             ("failure", "research_failures", "failure_id"),
             ("validation", "research_validations", "validation_id"),
@@ -1600,6 +1875,8 @@ class ResearchApiStateStore:
         table_map = {
             "evidence": ("research_evidences", "evidence_id"),
             "assumption": ("research_assumptions", "assumption_id"),
+            "conclusion": ("research_conclusions", "conclusion_id"),
+            "gap": ("research_gaps", "gap_id"),
             "conflict": ("research_conflicts", "conflict_id"),
             "failure": ("research_failures", "failure_id"),
             "validation": ("research_validations", "validation_id"),
@@ -1615,9 +1892,10 @@ class ResearchApiStateStore:
             f"""
             INSERT INTO {table_name} (
                 {id_column}, workspace_id, candidate_id, source_id, text, normalized_text,
-                source_span_json, candidate_batch_id, extraction_job_id, created_at, created_request_id
+                source_span_json, semantic_type, quote, trace_refs_json,
+                candidate_batch_id, extraction_job_id, created_at, created_request_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 object_id,
@@ -1627,6 +1905,9 @@ class ResearchApiStateStore:
                 str(candidate["text"]),
                 normalized_text,
                 self._dumps(candidate["source_span"]),
+                candidate.get("semantic_type"),
+                candidate.get("quote"),
+                self._dumps(candidate.get("trace_refs") or {}),
                 candidate.get("candidate_batch_id"),
                 candidate.get("extraction_job_id"),
                 now,
@@ -2083,6 +2364,8 @@ class ResearchApiStateStore:
         table_specs = [
             ("evidence", "research_evidences", "evidence_id"),
             ("assumption", "research_assumptions", "assumption_id"),
+            ("conclusion", "research_conclusions", "conclusion_id"),
+            ("gap", "research_gaps", "gap_id"),
             ("conflict", "research_conflicts", "conflict_id"),
             ("failure", "research_failures", "failure_id"),
             ("validation", "research_validations", "validation_id"),
@@ -2091,7 +2374,8 @@ class ResearchApiStateStore:
         for object_type, table_name, id_col in table_specs:
             rows = self._fetchall(
                 f"""
-                SELECT {id_col} AS object_id, source_id, text, created_at
+                SELECT {id_col} AS object_id, candidate_id, source_id, text,
+                       source_span_json, semantic_type, quote, trace_refs_json, created_at
                 FROM {table_name}
                 WHERE workspace_id = ?
                 ORDER BY created_at ASC
@@ -2104,9 +2388,14 @@ class ResearchApiStateStore:
                     {
                         "object_type": object_type,
                         "object_id": row["object_id"],
+                        "candidate_id": row["candidate_id"],
                         "workspace_id": workspace_id,
                         "source_id": row["source_id"],
                         "text": row["text"],
+                        "source_span": self._loads(row["source_span_json"]) or {},
+                        "semantic_type": row["semantic_type"],
+                        "quote": row["quote"],
+                        "trace_refs": self._loads_dict(row["trace_refs_json"]),
                         "created_at": row["created_at"],
                     }
                     for row in rows

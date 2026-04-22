@@ -245,6 +245,70 @@ def test_slice5_graph_build_query_and_update_flow() -> None:
     assert event_row is not None and event_row[0] >= 4
 
 
+def test_slice5_graph_insight_endpoints_return_explicit_sections() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_slice5_insights"
+    first = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "evidence",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "insight_evidence",
+            "short_label": "Evidence",
+            "full_description": "Evidence supports conclusion.",
+        },
+    )
+    second = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "conclusion",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "insight_conclusion",
+            "short_label": "Conclusion",
+            "full_description": "Conclusion under review.",
+        },
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    evidence_node_id = first.json()["node_id"]
+    conclusion_node_id = second.json()["node_id"]
+    edge = client.post(
+        "/api/v1/research/graph/edges",
+        json={
+            "workspace_id": workspace_id,
+            "source_node_id": evidence_node_id,
+            "target_node_id": conclusion_node_id,
+            "edge_type": "supports",
+            "object_ref_type": "manual_link",
+            "object_ref_id": "insight_supports",
+            "strength": 0.9,
+        },
+    )
+    assert edge.status_code == 200
+
+    support = client.post(
+        f"/api/v1/research/graph/{workspace_id}/support-chains",
+        json={"workspace_id": workspace_id, "conclusion_node_id": conclusion_node_id},
+    )
+    predicted = client.post(
+        f"/api/v1/research/graph/{workspace_id}/predicted-links",
+        json={"workspace_id": workspace_id, "node_id": conclusion_node_id},
+    )
+    deep = client.post(
+        f"/api/v1/research/graph/{workspace_id}/deep-chains",
+        json={"workspace_id": workspace_id, "node_id": conclusion_node_id},
+    )
+
+    assert support.status_code == 200
+    assert predicted.status_code == 200
+    assert deep.status_code == 200
+    assert "support_chains" in support.json()
+    assert "predicted_links" in predicted.json()
+    assert "deep_chains" in deep.json()
+
+
 def test_slice5_workspace_validation_and_error_semantics() -> None:
     client = _build_test_client()
     workspace_id = "ws_slice5_error"

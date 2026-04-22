@@ -16,6 +16,7 @@ import {
   listFailures,
   listPackages,
   listSources,
+  listWorkspaces,
   listHypotheses,
   listHypothesisTriggers,
   generateHypothesis,
@@ -43,6 +44,7 @@ import {
   getAsyncJobUiState,
   getErrorMessage,
 } from './api';
+import { chooseWorkspaceToRestore, hasWorkspaceContent } from './workspace-restore-helpers';
 
 const DEFAULT_WORKSPACE_ID = 'ws-default-1';
 const WORKSPACE_STORAGE_KEY = 'mironicky.workspace_id';
@@ -407,6 +409,7 @@ export default function App() {
   const [lastExtractionContext, setLastExtractionContext] = useState<ExtractionContext | null>(null);
   const extractionContextRef = useRef<ExtractionContext | null>(null);
   const fetchDataRef = useRef<() => Promise<void>>(async () => undefined);
+  const workspaceRestoreAttemptedRef = useRef(false);
   const [isWorkspaceEditorOpen, setIsWorkspaceEditorOpen] = useState(false);
   const [workspaceDraft, setWorkspaceDraft] = useState('');
   const [isGeneratingRoute, setIsGeneratingRoute] = useState(false);
@@ -452,6 +455,35 @@ export default function App() {
       setPackages(resPkg.items || []);
       setHypotheses(Array.isArray(resHyp.items) ? resHyp.items : []);
       setSources(Array.isArray(resSources.items) ? resSources.items : []);
+      if (!workspaceRestoreAttemptedRef.current && workspaceId === DEFAULT_WORKSPACE_ID) {
+        workspaceRestoreAttemptedRef.current = true;
+        const currentWorkspaceSnapshot = {
+          sourceCount: Array.isArray(resSources.items) ? resSources.items.length : Number(resSources.total || 0),
+          nodeCount: Array.isArray(resGraph.nodes) ? resGraph.nodes.length : 0,
+          edgeCount: Array.isArray(resGraph.edges) ? resGraph.edges.length : 0,
+          routeCount: Array.isArray(resRoutes.items) ? resRoutes.items.length : Number(resRoutes.total || 0),
+          candidateCount: Array.isArray(resCand.items) ? resCand.items.length : Number(resCand.total || 0),
+        };
+        if (!hasWorkspaceContent(currentWorkspaceSnapshot)) {
+          const restoreTarget = chooseWorkspaceToRestore(
+            workspaceId,
+            currentWorkspaceSnapshot,
+            (await listWorkspaces()).items || [],
+            DEFAULT_WORKSPACE_ID
+          );
+          if (restoreTarget) {
+            setWorkspaceId(restoreTarget);
+            setLastExtractionContext(null);
+            setHasLoadedOnce(false);
+            setSelRoute(0);
+            setSelFail(0);
+            setSelPkg(0);
+            setRecentAsyncTask(null);
+            showToast(`已恢复已有数据工作区：${restoreTarget}`);
+            return;
+          }
+        }
+      }
       if (currentExtractionContext?.sourceId) {
         const latestSource = (Array.isArray(resSources.items) ? resSources.items : []).find(
           (item: any) => String(item?.source_id) === String(currentExtractionContext.sourceId)

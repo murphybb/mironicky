@@ -34,6 +34,8 @@ class CandidateConfirmationService:
         return {
             "evidence": "evidence",
             "assumption": "assumption",
+            "conclusion": "conclusion",
+            "gap": "gap",
             "conflict": "conflict",
             "failure": "failure",
             "validation": "validation",
@@ -113,6 +115,101 @@ class CandidateConfirmationService:
             return None
         return matched[-1]
 
+    def _confirmed_object_by_candidate_id(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        for item in self._store.list_confirmed_objects(workspace_id, conn=conn):
+            if str(item.get("candidate_id")) == candidate_id:
+                return item
+        return None
+
+    def _materialize_resolved_relation_edges(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        candidate: dict[str, object],
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        relations = self._store.list_relation_candidates(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            candidate_batch_id=str(candidate.get("candidate_batch_id") or ""),
+            conn=conn,
+        )
+        if not relations:
+            return []
+
+        candidate_id = str(candidate["candidate_id"])
+        edge_ids: list[str] = []
+        for relation in relations:
+            if str(relation.get("relation_status")) != "resolved":
+                continue
+            relation_type = str(relation.get("relation_type") or "").strip()
+            if not relation_type:
+                continue
+            source_candidate_id = str(relation.get("source_candidate_id") or "")
+            target_candidate_id = str(relation.get("target_candidate_id") or "")
+            if candidate_id not in {source_candidate_id, target_candidate_id}:
+                continue
+            source_object = self._confirmed_object_by_candidate_id(
+                workspace_id=workspace_id,
+                candidate_id=source_candidate_id,
+                conn=conn,
+            )
+            target_object = self._confirmed_object_by_candidate_id(
+                workspace_id=workspace_id,
+                candidate_id=target_candidate_id,
+                conn=conn,
+            )
+            if source_object is None or target_object is None:
+                continue
+            source_node = self._resolve_active_node_by_object_ref(
+                workspace_id=workspace_id,
+                object_ref_type=str(source_object["object_type"]),
+                object_ref_id=str(source_object["object_id"]),
+                conn=conn,
+            )
+            target_node = self._resolve_active_node_by_object_ref(
+                workspace_id=workspace_id,
+                object_ref_type=str(target_object["object_type"]),
+                object_ref_id=str(target_object["object_id"]),
+                conn=conn,
+            )
+            if source_node is None or target_node is None:
+                continue
+            if str(source_node["node_id"]) == str(target_node["node_id"]):
+                continue
+            relation_id = str(relation["relation_candidate_id"])
+            existing_edge = self._store.find_graph_edge_by_ref(
+                workspace_id=workspace_id,
+                source_node_id=str(source_node["node_id"]),
+                target_node_id=str(target_node["node_id"]),
+                edge_type=relation_type,
+                object_ref_type="relation_candidate",
+                object_ref_id=relation_id,
+                conn=conn,
+            )
+            edge = existing_edge
+            if edge is None or str(edge.get("status")) not in self._active_statuses:
+                edge = self._store.create_graph_edge(
+                    workspace_id=workspace_id,
+                    source_node_id=str(source_node["node_id"]),
+                    target_node_id=str(target_node["node_id"]),
+                    edge_type=relation_type,
+                    object_ref_type="relation_candidate",
+                    object_ref_id=relation_id,
+                    strength=0.9,
+                    status="active",
+                    conn=conn,
+                )
+            edge_ids.append(str(edge["edge_id"]))
+        return edge_ids
+
     def _materialize_graph_version_for_confirmation(
         self,
         *,
@@ -164,8 +261,23 @@ class CandidateConfirmationService:
         )
         anchor = evidence_anchor or (same_source_nodes[0] if same_source_nodes else None)
 
-        edge_ids: list[str] = []
-        if anchor is not None and str(anchor["node_id"]) != str(node["node_id"]):
+        relation_candidates = self._store.list_relation_candidates(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            candidate_batch_id=str(candidate.get("candidate_batch_id") or ""),
+            conn=conn,
+        )
+        edge_ids = self._materialize_resolved_relation_edges(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            candidate=candidate,
+            conn=conn,
+        )
+        if (
+            not relation_candidates
+            and anchor is not None
+            and str(anchor["node_id"]) != str(node["node_id"])
+        ):
             edge_type = self._edge_type_for_node_type(str(node["node_type"]))
             existing_edge = self._store.find_graph_edge_by_ref(
                 workspace_id=workspace_id,

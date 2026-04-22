@@ -174,6 +174,26 @@ class _ResolvedSourceImport:
     metadata: dict[str, object]
 
 
+@dataclass(frozen=True)
+class StructuredPdfBlock:
+    page_number: int
+    block_index: int
+    text: str
+    anchor_id: str
+    start: int
+    end: int
+    paragraph_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class StructuredPdfDocument:
+    parser: str
+    pages: int
+    text: str
+    chars: int
+    blocks: tuple[StructuredPdfBlock, ...]
+
+
 class SourceImportService:
     def __init__(self, store: ResearchApiStateStore) -> None:
         self._store = store
@@ -478,10 +498,13 @@ class SourceImportService:
                 status_code=400,
             )
         file_bytes = self._load_local_file_bytes(local_file)
+        parser_metadata: dict[str, object] | None = None
         if suffix == ".docx":
             extracted_text = self._extract_docx_text(file_bytes)
         else:
-            extracted_text = self._extract_pdf_text(file_bytes)
+            pdf_document = self._extract_pdf_document(file_bytes)
+            extracted_text = self._get_pdf_document_text(pdf_document)
+            parser_metadata = self._get_pdf_document_metadata(pdf_document)
         supplemental_text = self._normalize_whitespace(content or "")
         if supplemental_text:
             extracted_text = f"{extracted_text}\n\n{supplemental_text}"
@@ -493,12 +516,18 @@ class SourceImportService:
                 details={"file_name": file_name, "local_path": local_path},
                 status_code=400,
             )
-        resolved_title = (title or "").strip() or Path(
-            file_name or local_path
-        ).stem or self._derive_title(normalized_text, source_type)
+        resolved_title = (
+            (title or "").strip()
+            or Path(file_name or local_path).stem
+            or self._derive_title(normalized_text, source_type)
+        )
         metadata_with_file = dict(metadata)
-        metadata_with_file.setdefault("local_file_name", file_name or Path(local_path).name)
+        metadata_with_file.setdefault(
+            "local_file_name", file_name or Path(local_path).name
+        )
         metadata_with_file.setdefault("local_file_format", suffix.lstrip("."))
+        if parser_metadata is not None:
+            metadata_with_file.setdefault("parser_metadata", parser_metadata)
         if local_path:
             metadata_with_file.setdefault("local_file_path", local_path)
         return self._finalize_source_payload(
@@ -628,8 +657,34 @@ class SourceImportService:
         ]
         return self._normalize_whitespace(" ".join(texts))
 
-    def _extract_pdf_text(self, raw_bytes: bytes) -> str:
+    def _extract_pdf_document(self, raw_bytes: bytes) -> StructuredPdfDocument:
+        try:
+            import fitz  # type: ignore[import-not-found]
+
+            document = fitz.open(stream=raw_bytes, filetype="pdf")
+            page_blocks: list[tuple[int, int, str]] = []
+            for page_index in range(document.page_count):
+                page = document.load_page(page_index)
+                for block_index, block in enumerate(page.get_text("blocks") or []):
+                    text = str(block[4] if len(block) > 4 else "")
+                    page_blocks.append((page_index + 1, block_index, text))
+            parsed = self._build_structured_pdf_document(
+                parser="pymupdf",
+                pages=int(document.page_count),
+                page_blocks=page_blocks,
+            )
+            if parsed.text:
+                return parsed
+        except Exception:
+            pass
+
+        return self._extract_pdf_document_with_pypdf(raw_bytes)
+
+    def _extract_pdf_document_with_pypdf(
+        self, raw_bytes: bytes
+    ) -> StructuredPdfDocument:
         pdf_reader_cls = None
+        parser_name = "pypdf"
         try:
             from pypdf import PdfReader  # type: ignore[import-not-found]
 
@@ -639,6 +694,7 @@ class SourceImportService:
                 from PyPDF2 import PdfReader  # type: ignore[import-not-found]
 
                 pdf_reader_cls = PdfReader
+                parser_name = "PyPDF2"
             except ImportError as exc:
                 raise SourceImportError(
                     error_code="research.source_import_parse_failed",
@@ -648,10 +704,14 @@ class SourceImportService:
                 ) from exc
         try:
             reader = pdf_reader_cls(io.BytesIO(raw_bytes))
-            extracted = " ".join(
-                (page.extract_text() or "").strip() for page in reader.pages
+            page_blocks = [
+                (page_index + 1, 0, page.extract_text() or "")
+                for page_index, page in enumerate(reader.pages)
+            ]
+            parsed = self._build_structured_pdf_document(
+                parser=parser_name, pages=len(reader.pages), page_blocks=page_blocks
             )
-            return self._normalize_whitespace(extracted)
+            return parsed
         except Exception as exc:
             raise SourceImportError(
                 error_code="research.source_import_parse_failed",
@@ -659,6 +719,86 @@ class SourceImportService:
                 details={"reason": str(exc)},
                 status_code=400,
             ) from exc
+
+    def _extract_pdf_text(self, raw_bytes: bytes) -> str:
+        return self._get_pdf_document_text(self._extract_pdf_document(raw_bytes))
+
+    def _build_structured_pdf_document(
+        self, *, parser: str, pages: int, page_blocks: list[tuple[int, int, str]]
+    ) -> StructuredPdfDocument:
+        blocks: list[StructuredPdfBlock] = []
+        text_parts: list[str] = []
+        offset = 0
+        for page_number, block_index, raw_text in page_blocks:
+            text = self._normalize_whitespace(raw_text)
+            if not text:
+                continue
+            if text_parts:
+                offset += 1
+            start = offset
+            end = start + len(text)
+            anchor_id = f"p{page_number}-b{block_index}"
+            blocks.append(
+                StructuredPdfBlock(
+                    page_number=page_number,
+                    block_index=block_index,
+                    text=text,
+                    anchor_id=anchor_id,
+                    start=start,
+                    end=end,
+                    paragraph_ids=(f"{anchor_id}-par0",),
+                )
+            )
+            text_parts.append(text)
+            offset = end
+
+        normalized_text = " ".join(text_parts)
+        return StructuredPdfDocument(
+            parser=parser,
+            pages=pages,
+            text=normalized_text,
+            chars=len(normalized_text),
+            blocks=tuple(blocks),
+        )
+
+    def _get_pdf_document_text(
+        self, document: StructuredPdfDocument | dict[str, object]
+    ) -> str:
+        if isinstance(document, dict):
+            return self._normalize_whitespace(str(document.get("text") or ""))
+        return self._normalize_whitespace(document.text)
+
+    def _get_pdf_document_metadata(
+        self, document: StructuredPdfDocument | dict[str, object]
+    ) -> dict[str, object]:
+        if isinstance(document, dict):
+            blocks = document.get("blocks")
+            return {
+                "parser": str(document.get("parser") or "unknown"),
+                "pages": int(document.get("pages") or 0),
+                "chars": int(
+                    document.get("chars") or len(str(document.get("text") or ""))
+                ),
+                "blocks": blocks if isinstance(blocks, list) else [],
+            }
+
+        return {
+            "parser": document.parser,
+            "pages": document.pages,
+            "chars": document.chars,
+            "blocks": [
+                {
+                    "anchor_id": block.anchor_id,
+                    "page_number": block.page_number,
+                    "block_index": block.block_index,
+                    "paragraph_ids": list(block.paragraph_ids),
+                    "start": block.start,
+                    "end": block.end,
+                    "text": block.text,
+                }
+                for block in document.blocks
+            ],
+        }
 
     def _finalize_source_payload(
         self,
@@ -698,8 +838,7 @@ class SourceImportService:
             if detected_year is not None:
                 normalized_metadata["publication_year"] = detected_year
         normalized_metadata["topic_clusters"] = self._build_topic_clusters(
-            title=normalized_title,
-            content=normalized_content,
+            title=normalized_title, content=normalized_content
         )
         normalized_metadata["topic_cluster_version"] = "deterministic_v2"
         if source_type == "paper":
@@ -827,7 +966,9 @@ class SourceImportService:
         ranked = sorted(year_counter.items(), key=lambda item: (-item[1], -item[0]))
         return int(ranked[0][0])
 
-    def _build_topic_clusters(self, *, title: str, content: str) -> list[dict[str, object]]:
+    def _build_topic_clusters(
+        self, *, title: str, content: str
+    ) -> list[dict[str, object]]:
         weighted_text = f"{title}\n{title}\n{content}"
         all_terms = self._extract_topic_terms(weighted_text)
         if not all_terms:
@@ -837,8 +978,7 @@ class SourceImportService:
         ranked_terms = [
             term
             for term, _ in sorted(
-                term_counts.items(),
-                key=lambda item: (-item[1], item[0]),
+                term_counts.items(), key=lambda item: (-item[1], item[0])
             )
         ]
         seed_terms: list[str] = []
@@ -856,7 +996,9 @@ class SourceImportService:
             for chunk in _TOPIC_SENTENCE_SPLIT_RE.split(weighted_text)
             if chunk.strip()
         ]
-        co_occurrence: dict[str, CollectionsCounter[str]] = defaultdict(CollectionsCounter)
+        co_occurrence: dict[str, CollectionsCounter[str]] = defaultdict(
+            CollectionsCounter
+        )
         seed_hits: CollectionsCounter[str] = CollectionsCounter()
         for sentence in sentence_terms:
             if not sentence:
@@ -876,8 +1018,7 @@ class SourceImportService:
             neighbors = [
                 term
                 for term, _ in sorted(
-                    co_occurrence[seed].items(),
-                    key=lambda item: (-item[1], item[0]),
+                    co_occurrence[seed].items(), key=lambda item: (-item[1], item[0])
                 )
                 if term_counts.get(term, 0) > 1
             ][:4]

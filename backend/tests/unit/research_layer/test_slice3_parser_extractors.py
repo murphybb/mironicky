@@ -45,6 +45,37 @@ def test_source_parser_splits_chinese_punctuation_into_multiple_segments() -> No
     ]
 
 
+def test_source_parser_preserves_structured_block_anchors() -> None:
+    parser = SourceParser()
+    parsed = parser.parse(
+        source_type="paper",
+        content="First claim. Supporting evidence.",
+        metadata={
+            "parser_metadata": {
+                "blocks": [
+                    {
+                        "anchor_id": "p1-b0",
+                        "page_number": 1,
+                        "block_index": 0,
+                        "paragraph_ids": ["p1-b0-par0"],
+                        "start": 0,
+                        "end": 33,
+                        "text": "First claim. Supporting evidence.",
+                    }
+                ]
+            }
+        },
+    )
+
+    assert [segment.text for segment in parsed.segments] == [
+        "First claim.",
+        "Supporting evidence.",
+    ]
+    assert parsed.segments[0].page == 1
+    assert parsed.segments[0].block_id == "p1-b0"
+    assert parsed.segments[0].paragraph_id == "p1-b0-par0"
+
+
 def test_source_parser_raises_parse_failure() -> None:
     parser = SourceParser()
     with pytest.raises(ParseFailureError):
@@ -164,4 +195,3 @@ def test_slice3_fixture_covers_required_source_types() -> None:
     source_types = {item["source_type"] for item in payload["sources"]}
 
     assert {"paper", "note", "failure_record"}.issubset(source_types)
-

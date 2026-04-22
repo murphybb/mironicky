@@ -102,6 +102,21 @@ class GraphQueryRequest(BaseModel):
     max_hops: int = Field(default=1, ge=1, le=5)
 
 
+class GraphSupportChainsRequest(WorkspaceScopedBody):
+    conclusion_node_id: str = Field(min_length=1)
+    max_chains: int = Field(default=5, ge=1, le=20)
+
+
+class GraphPredictedLinksRequest(WorkspaceScopedBody):
+    node_id: str = Field(min_length=1)
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
+class GraphDeepChainsRequest(WorkspaceScopedBody):
+    node_id: str = Field(min_length=1)
+    max_chains: int = Field(default=5, ge=1, le=20)
+
+
 class GraphVersionRecord(BaseModel):
     version_id: str
     workspace_id: str

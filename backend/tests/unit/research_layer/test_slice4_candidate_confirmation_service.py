@@ -259,6 +259,150 @@ def test_confirm_workspace_mismatch_returns_conflict(tmp_path) -> None:
     assert exc.value.status_code == 409
 
 
+def test_candidate_store_persists_prompt_b_anchor_metadata(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    source = store.create_source(
+        workspace_id="ws_slice4_prompt_b_meta",
+        source_type="paper",
+        title="prompt b seed",
+        content="Claim sentence.",
+        metadata={},
+        import_request_id="req_prompt_b_meta",
+    )
+    job = store.create_job(
+        job_type="source_extract",
+        workspace_id="ws_slice4_prompt_b_meta",
+        request_id="req_prompt_b_meta",
+    )
+    batch = store.create_candidate_batch(
+        workspace_id="ws_slice4_prompt_b_meta",
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        request_id="req_prompt_b_meta",
+    )
+
+    created = store.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id="ws_slice4_prompt_b_meta",
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        candidates=[
+            {
+                "candidate_type": "conclusion",
+                "semantic_type": "claim",
+                "text": "The paper concludes retrieval improves accuracy.",
+                "source_span": {"page": 1, "block_id": "p1-b0", "paragraph_id": "p1-b0-par0"},
+                "quote": "retrieval improves accuracy",
+                "trace_refs": {"argument_unit_id": "u1", "block_id": "p1-b0"},
+                "extractor_name": "argument_unit_extractor",
+            }
+        ],
+    )
+
+    assert created[0]["candidate_type"] == "conclusion"
+    assert created[0]["semantic_type"] == "claim"
+    assert created[0]["quote"] == "retrieval improves accuracy"
+    assert created[0]["trace_refs"]["argument_unit_id"] == "u1"
+
+
+def test_confirm_materializes_only_resolved_relation_candidates(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    service = CandidateConfirmationService(store)
+    workspace_id = "ws_slice4_resolved_relations"
+    source = store.create_source(
+        workspace_id=workspace_id,
+        source_type="paper",
+        title="relation seed",
+        content="Evidence supports conclusion. Open question is unresolved.",
+        metadata={},
+        import_request_id="req_relation_seed",
+    )
+    job = store.create_job(
+        job_type="source_extract",
+        workspace_id=workspace_id,
+        request_id="req_relation_seed",
+    )
+    batch = store.create_candidate_batch(
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        request_id="req_relation_seed",
+    )
+    candidates = store.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        candidates=[
+            {
+                "candidate_type": "evidence",
+                "semantic_type": "evidence",
+                "text": "Evidence sentence.",
+                "source_span": {"page": 1, "block_id": "p1-b0"},
+                "quote": "Evidence sentence.",
+                "trace_refs": {"argument_unit_id": "u_evidence"},
+                "extractor_name": "argument_unit_extractor",
+            },
+            {
+                "candidate_type": "conclusion",
+                "semantic_type": "claim",
+                "text": "Conclusion sentence.",
+                "source_span": {"page": 1, "block_id": "p1-b1"},
+                "quote": "Conclusion sentence.",
+                "trace_refs": {"argument_unit_id": "u_claim"},
+                "extractor_name": "argument_unit_extractor",
+            },
+        ],
+    )
+    evidence_candidate_id = str(candidates[0]["candidate_id"])
+    conclusion_candidate_id = str(candidates[1]["candidate_id"])
+    store.add_relation_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        relations=[
+            {
+                "source_candidate_id": evidence_candidate_id,
+                "target_candidate_id": conclusion_candidate_id,
+                "semantic_relation_type": "supports",
+                "relation_type": "supports",
+                "relation_status": "resolved",
+                "quote": "Evidence supports conclusion.",
+                "trace_refs": {"block_id": "p1-b0"},
+            },
+            {
+                "source_candidate_id": conclusion_candidate_id,
+                "target_candidate_id": evidence_candidate_id,
+                "semantic_relation_type": "unknown",
+                "relation_type": "conflicts",
+                "relation_status": "unresolved",
+                "quote": "Open question is unresolved.",
+                "trace_refs": {"block_id": "p1-b2"},
+            },
+        ],
+    )
+
+    first = service.confirm(
+        workspace_id=workspace_id,
+        candidate_id=evidence_candidate_id,
+        request_id="req_confirm_evidence",
+    )
+    second = service.confirm(
+        workspace_id=workspace_id,
+        candidate_id=conclusion_candidate_id,
+        request_id="req_confirm_conclusion",
+    )
+
+    edges = store.list_graph_edges(workspace_id)
+    active_edges = [edge for edge in edges if edge["status"] == "active"]
+    assert first["graph_edge_ids"] == []
+    assert len(second["graph_edge_ids"]) == 1
+    assert len(active_edges) == 1
+    assert active_edges[0]["edge_type"] == "supports"
+    assert active_edges[0]["object_ref_type"] == "relation_candidate"
+
+
 def test_confirm_graph_version_persistence_failure_is_explicit(tmp_path, monkeypatch) -> None:
     store = _build_store(tmp_path)
     service = CandidateConfirmationService(store)
