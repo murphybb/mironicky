@@ -170,8 +170,8 @@ class ResearchSourceController(BaseController):
         failure_mode_header = request.headers.get("x-research-llm-failure-mode")
         fallback_header = str(
             request.headers.get("x-research-llm-allow-fallback") or ""
-        ).strip()
-        allow_fallback = fallback_header not in {"0", "false", "FALSE"}
+        ).strip().lower()
+        allow_fallback = fallback_header in {"1", "true", "yes", "on", "enabled"}
         source = STORE.get_source(source_id)
         ensure(
             source is not None,

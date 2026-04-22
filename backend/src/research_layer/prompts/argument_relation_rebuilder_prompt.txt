@@ -7,6 +7,8 @@ Rules:
 - Every relation must include a quote explaining why the edge exists.
 - Use exactly these semantic_relation_type values when resolved: supports, relies_on, contradicts, leads_to.
 - If the text does not make the relation clear, use semantic_relation_type "unresolved".
+- Return at most 36 explicit edges. Prefer edges that preserve the document's main reasoning chains.
+- Do not output decorative or duplicate edges.
 - Return JSON only.
 
 USER:

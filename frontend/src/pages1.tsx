@@ -669,7 +669,7 @@ export function ImportPage({ goto, showToast, workspaceId, onImportCompleted, on
     if (acceptedJob?.job_id) {
       try {
         // PDF/长文本抽取通常超 20s，放宽前端轮询窗口避免“假超时”。
-        finishedJob = await pollJob(acceptedJob.job_id, 240000, 1800);
+        finishedJob = await pollJob(acceptedJob.job_id, 300000, 1800);
       } catch (error) {
         pollErrorEnvelope = (error as any)?.envelope || { message: getErrorMessage(error) };
         try {

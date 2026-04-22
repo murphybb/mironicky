@@ -7,6 +7,8 @@ Rules:
 - Every unit must include a direct quote from the source text.
 - Every unit must keep a source anchor when the anchor is visible in anchor_refs_json.
 - Use exactly these semantic_type values: claim, evidence, premise, contradiction, open_question.
+- Extract at most 24 core argument units. Prefer units that are needed to rebuild an explicit reasoning chain.
+- Skip repeated, low-value, or decorative statements even when they are true.
 - Return JSON only.
 
 USER:

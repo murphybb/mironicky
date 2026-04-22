@@ -360,6 +360,48 @@ def test_slice12_regression_graph_archive_delete_contract_sync() -> None:
     assert duplicate_archive.json()["detail"]["error_code"] == "research.invalid_state"
 
 
+def test_slice12_regression_workbench_graph_insight_endpoints_remain_callable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("RESEARCH_FEATURE_GRAPH_REPORT_ENABLED", "1")
+    client = _build_test_client()
+    workspace_id = "ws_slice12_workbench_insights"
+    _seed_minimal_route_workspace(client, workspace_id)
+
+    graph = client.get(f"/api/v1/research/graph/{workspace_id}")
+    assert graph.status_code == 200
+    graph_payload = graph.json()
+    assert graph_payload["nodes"]
+    node_id = graph_payload["nodes"][0]["node_id"]
+
+    support_chains = client.post(
+        f"/api/v1/research/graph/{workspace_id}/support-chains",
+        json={
+            "workspace_id": workspace_id,
+            "conclusion_node_id": node_id,
+            "max_chains": 3,
+        },
+    )
+    predicted_links = client.post(
+        f"/api/v1/research/graph/{workspace_id}/predicted-links",
+        json={"workspace_id": workspace_id, "node_id": node_id, "top_k": 3},
+    )
+    deep_chains = client.post(
+        f"/api/v1/research/graph/{workspace_id}/deep-chains",
+        json={"workspace_id": workspace_id, "node_id": node_id, "max_chains": 3},
+    )
+    report = client.get(f"/api/v1/research/graph/{workspace_id}/report")
+
+    assert support_chains.status_code == 200
+    assert predicted_links.status_code == 200
+    assert deep_chains.status_code == 200
+    assert report.status_code == 200
+    assert "support_chains" in support_chains.json()
+    assert "predicted_links" in predicted_links.json()
+    assert "deep_chains" in deep_chains.json()
+    assert report.json()["summary"]["node_count"] >= 1
+
+
 def test_slice12_regression_hypothesis_inbox_defer_contract_sync() -> None:
     client = _build_test_client()
     workspace_id = "ws_slice12_hypothesis_inbox"

@@ -12,6 +12,8 @@ from research_layer.services.prompt_renderer import (
     render_prompt_template,
 )
 
+_MAX_ARGUMENT_UNITS = 24
+
 
 class ArgumentUnitExtractionService:
     prompt_file_name = "argument_unit_extractor_prompt.txt"
@@ -104,4 +106,4 @@ class ArgumentUnitExtractionService:
                     "anchor": anchor,
                 }
             )
-        return units, result
+        return units[:_MAX_ARGUMENT_UNITS], result

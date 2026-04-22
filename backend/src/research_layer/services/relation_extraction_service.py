@@ -12,6 +12,8 @@ from research_layer.services.prompt_renderer import (
     render_prompt_template,
 )
 
+_MAX_ARGUMENT_RELATIONS = 36
+
 
 class RelationExtractionService:
     prompt_file_name = "argument_relation_rebuilder_prompt.txt"
@@ -95,4 +97,4 @@ class RelationExtractionService:
                     "quote": str(item.get("quote") or "").strip(),
                 }
             )
-        return relations, result
+        return relations[:_MAX_ARGUMENT_RELATIONS], result

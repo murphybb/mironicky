@@ -175,7 +175,6 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
     setViewport((prev) => ({ ...prev, scale: clampZoom(prev.scale, e.deltaY) }));
   };
 

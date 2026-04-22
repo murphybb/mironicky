@@ -24,6 +24,7 @@ from research_layer.api.controllers.research_source_controller import (
     ResearchSourceController,
 )
 from research_layer.api.schemas.source import CANDIDATE_TYPE_VALUES
+from research_layer.services.llm_trace import LLMCallResult
 from research_layer.services.source_import_service import SourceImportError, SourceImportService
 from research_layer.testing.job_helpers import wait_for_job_terminal
 
@@ -431,6 +432,199 @@ def test_sources_list_returns_real_workspace_scoped_materials() -> None:
     other_payload = other_list_response.json()
     assert other_payload["total"] == 1
     assert other_payload["items"][0]["workspace_id"] == ws_other
+
+
+class _PromptBArgumentGraphGateway:
+    async def invoke_json(self, **kwargs: object) -> LLMCallResult:
+        prompt_name = str(kwargs.get("prompt_name") or "")
+        if prompt_name == "argument_unit_extraction":
+            parsed_json: dict[str, object] = {
+                "units": [
+                    {
+                        "unit_id": "u_claim",
+                        "semantic_type": "claim",
+                        "text": "The report concludes that reputation repair needs sustained governance reform.",
+                        "quote": "The report concludes that reputation repair needs sustained governance reform.",
+                        "anchor": {"page": 1, "block_id": "p1-b1"},
+                    },
+                    {
+                        "unit_id": "u_evidence",
+                        "semantic_type": "evidence",
+                        "text": "The incident frequency rose by 186 percent year over year.",
+                        "quote": "The incident frequency rose by 186 percent year over year.",
+                        "anchor": {"page": 2, "block_id": "p2-b1"},
+                    },
+                    {
+                        "unit_id": "u_premise",
+                        "semantic_type": "premise",
+                        "text": "The recovery window is assumed to take one to two years.",
+                        "quote": "The recovery window is assumed to take one to two years.",
+                        "anchor": {"page": 3, "block_id": "p3-b1"},
+                    },
+                    {
+                        "unit_id": "u_contradiction",
+                        "semantic_type": "contradiction",
+                        "text": "Public emotion changed from shock to disappointment.",
+                        "quote": "Public emotion changed from shock to disappointment.",
+                        "anchor": {"page": 4, "block_id": "p4-b1"},
+                    },
+                    {
+                        "unit_id": "u_gap",
+                        "semantic_type": "open_question",
+                        "text": "Whether public trust can be rebuilt still requires monitoring.",
+                        "quote": "Whether public trust can be rebuilt still requires monitoring.",
+                        "anchor": {"page": 5, "block_id": "p5-b1"},
+                    },
+                ]
+            }
+            raw_text = '{"units":[]}'
+            response_id = "resp_prompt_b_units"
+        else:
+            parsed_json = {
+                "relations": [
+                    {
+                        "source_unit_id": "u_evidence",
+                        "target_unit_id": "u_claim",
+                        "semantic_relation_type": "supports",
+                        "quote": "The incident frequency rose by 186 percent year over year.",
+                    },
+                    {
+                        "source_unit_id": "u_claim",
+                        "target_unit_id": "u_premise",
+                        "semantic_relation_type": "relies_on",
+                        "quote": "reputation repair needs sustained governance reform",
+                    },
+                    {
+                        "source_unit_id": "u_contradiction",
+                        "target_unit_id": "u_claim",
+                        "semantic_relation_type": "contradicts",
+                        "quote": "Public emotion changed from shock to disappointment.",
+                    },
+                    {
+                        "source_unit_id": "u_gap",
+                        "target_unit_id": "u_claim",
+                        "semantic_relation_type": "unclear",
+                        "quote": "Whether public trust can be rebuilt still requires monitoring.",
+                    },
+                ]
+            }
+            raw_text = '{"relations":[]}'
+            response_id = "resp_prompt_b_relations"
+
+        return LLMCallResult(
+            provider_backend="integration_test_backend",
+            provider_model="integration_test_model",
+            request_id=str(kwargs["request_id"]),
+            llm_response_id=response_id,
+            usage={"prompt_tokens": 120, "completion_tokens": 80, "total_tokens": 200},
+            raw_text=raw_text,
+            parsed_json=parsed_json,
+            fallback_used=False,
+            degraded=False,
+            degraded_reason=None,
+        )
+
+
+def test_prompt_b_import_extract_confirm_builds_resolved_argument_graph(
+    monkeypatch,
+) -> None:
+    import research_layer.workers.extraction_worker as extraction_worker_module
+
+    monkeypatch.setattr(
+        extraction_worker_module,
+        "build_research_llm_gateway",
+        lambda: _PromptBArgumentGraphGateway(),
+    )
+    client = _build_test_client()
+    workspace_id = "ws_prompt_b_argument_graph"
+    content = "\n".join(
+        [
+            "The report concludes that reputation repair needs sustained governance reform.",
+            "The incident frequency rose by 186 percent year over year.",
+            "The recovery window is assumed to take one to two years.",
+            "Public emotion changed from shock to disappointment.",
+            "Whether public trust can be rebuilt still requires monitoring.",
+        ]
+    )
+
+    imported = client.post(
+        "/api/v1/research/sources/import",
+        json={
+            "workspace_id": workspace_id,
+            "source_type": "paper",
+            "title": "Prompt B argument graph source",
+            "content": content,
+        },
+    )
+    assert imported.status_code == 200
+    source_id = imported.json()["source_id"]
+
+    started = client.post(
+        f"/api/v1/research/sources/{source_id}/extract",
+        json={"workspace_id": workspace_id, "async_mode": True},
+        headers={"x-research-llm-allow-fallback": "0"},
+    )
+    assert started.status_code == 202
+    job_payload = wait_for_job_terminal(client, job_id=str(started.json()["job_id"]))
+    assert job_payload["status"] == "succeeded"
+    batch_id = job_payload["result_ref"]["resource_id"]
+
+    candidates_response = client.get(
+        "/api/v1/research/candidates",
+        params={"workspace_id": workspace_id, "source_id": source_id},
+    )
+    assert candidates_response.status_code == 200
+    candidates = candidates_response.json()["items"]
+    assert {item["candidate_type"] for item in candidates} >= {
+        "conclusion",
+        "evidence",
+        "assumption",
+        "conflict",
+        "gap",
+    }
+    for item in candidates:
+        assert item["candidate_batch_id"] == batch_id
+        assert item["trace_refs"]["argument_unit_id"]
+        assert item["source_span"]["end"] > item["source_span"]["start"]
+        assert item["source_span"]["text"]
+
+    relation_candidates = STORE.list_relation_candidates(
+        workspace_id=workspace_id,
+        source_id=source_id,
+        candidate_batch_id=batch_id,
+    )
+    assert len(relation_candidates) == 4
+    assert {
+        relation["relation_status"] for relation in relation_candidates
+    } == {"resolved", "unresolved"}
+    assert {
+        relation["relation_type"]
+        for relation in relation_candidates
+        if relation["relation_status"] == "resolved"
+    } == {"supports", "requires", "conflicts"}
+
+    confirmed = client.post(
+        "/api/v1/research/candidates/confirm",
+        json={
+            "workspace_id": workspace_id,
+            "candidate_ids": [item["candidate_id"] for item in candidates],
+        },
+    )
+    assert confirmed.status_code == 200
+
+    graph = client.get(f"/api/v1/research/graph/{workspace_id}")
+    assert graph.status_code == 200
+    graph_payload = graph.json()
+    assert len(graph_payload["nodes"]) == len(candidates)
+    assert {edge["edge_type"] for edge in graph_payload["edges"]} == {
+        "supports",
+        "requires",
+        "conflicts",
+    }
+    assert all(
+        edge["object_ref_type"] == "relation_candidate"
+        for edge in graph_payload["edges"]
+    )
 
 
 def _assert_invalid_request_response(response, *, reason_fragment: str) -> None:

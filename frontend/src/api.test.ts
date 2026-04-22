@@ -2,10 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  confirmCandidates,
+  extractSource,
+  getGraph,
   getGraphDeepChains,
   getGraphPredictedLinks,
   getGraphReport,
   getGraphSupportChains,
+  importSource,
 } from './api.ts';
 
 async function withMockFetch(handler: (url: string, init?: RequestInit) => unknown, run: () => Promise<void>) {
@@ -59,4 +63,67 @@ test('graph insight api wrappers call the dedicated backend endpoints', async ()
   assert.equal(calls[0].body.conclusion_node_id, 'node_a');
   assert.equal(calls[1].body.node_id, 'node_a');
   assert.equal(calls[2].body.node_id, 'node_a');
+});
+
+test('pdf argument graph flow wrappers call import, extract, confirm, and graph endpoints', async () => {
+  const calls: Array<{ url: string; body: any; method: string }> = [];
+
+  await withMockFetch(
+    (url, init) => {
+      calls.push({
+        url,
+        method: String(init?.method || 'GET'),
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url.endsWith('/sources/import')) return { source_id: 'src_pdf' };
+      if (url.endsWith('/sources/src_pdf/extract')) {
+        return {
+          job_id: 'job_pdf',
+          job_type: 'source_extract',
+          status: 'queued',
+          workspace_id: 'ws_pdf',
+        };
+      }
+      if (url.endsWith('/candidates/confirm')) return { updated_ids: ['cand_1'], status: 'confirmed' };
+      if (url.endsWith('/graph/ws_pdf')) {
+        return {
+          workspace_id: 'ws_pdf',
+          nodes: [{ node_id: 'node_1', short_label: 'Claim', node_type: 'conclusion' }],
+          edges: [],
+        };
+      }
+      return {};
+    },
+    async () => {
+      await importSource({
+        workspace_id: 'ws_pdf',
+        source_type: 'paper',
+        source_input_mode: 'local_file',
+        title: 'paper.pdf',
+        local_file: {
+          file_name: 'paper.pdf',
+          file_content_base64: 'JVBERi0=',
+          mime_type: 'application/pdf',
+        },
+      });
+      await extractSource('src_pdf', 'ws_pdf');
+      await confirmCandidates('ws_pdf', ['cand_1']);
+      const graph = await getGraph('ws_pdf');
+      assert.equal(graph.nodes[0].x, 120);
+      assert.equal(graph.nodes[0].y, 80);
+    }
+  );
+
+  assert.deepEqual(
+    calls.map((call) => [call.method, call.url]),
+    [
+      ['POST', '/api/v1/research/sources/import'],
+      ['POST', '/api/v1/research/sources/src_pdf/extract'],
+      ['POST', '/api/v1/research/candidates/confirm'],
+      ['GET', '/api/v1/research/graph/ws_pdf'],
+    ]
+  );
+  assert.equal(calls[0].body.source_input_mode, 'local_file');
+  assert.equal(calls[1].body.async_mode, true);
+  assert.deepEqual(calls[2].body.candidate_ids, ['cand_1']);
 });
