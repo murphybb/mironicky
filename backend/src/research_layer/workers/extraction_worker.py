@@ -2,7 +2,6 @@
 
 import os
 import re
-from dataclasses import asdict
 from types import SimpleNamespace
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
@@ -14,6 +13,9 @@ from research_layer.extractors import (
     ValidationExtractor,
 )
 from research_layer.extractors.types import ExtractFailureError
+from research_layer.services.argument_unit_extraction_service import (
+    ArgumentUnitExtractionService,
+)
 from research_layer.services.llm_gateway import ResearchLLMError
 from research_layer.services.llm_trace import LLMCallResult, build_event_trace_parts
 from research_layer.services.prompt_renderer import (
@@ -25,6 +27,7 @@ from research_layer.services.research_llm_dependencies import (
     build_research_llm_gateway,
     resolve_research_backend_and_model,
 )
+from research_layer.services.relation_extraction_service import RelationExtractionService
 from research_layer.services.source_parser import ParseFailureError, ParsedSource, SourceParser
 
 _EXTRACTION_FALLBACK_ALLOWED_ERRORS = {
@@ -158,60 +161,54 @@ class ExtractionWorker:
             degraded_reason: str | None = None
             partial_failure_count = 0
 
-            for extractor in self._extractors:
-                try:
-                    llm_candidates, trace_result = await self._extract_via_llm(
-                        extractor=extractor,
-                        request_id=request_id,
-                        workspace_id=workspace_id,
-                        source=source,
+            try:
+                prompt_chunk = self._build_prompt_chunk(parsed)
+                backend, model = resolve_research_backend_and_model()
+                units, latest_trace = await ArgumentUnitExtractionService(
+                    self._gateway
+                ).extract_units(
+                    request_id=request_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    source_title=str(source["title"]),
+                    source_type=str(source["source_type"]),
+                    chunk_id=f"chunk_{source['source_id']}",
+                    chunk_text=prompt_chunk,
+                    anchor_refs=self._build_anchor_refs(parsed),
+                    document_reading_memo="Rebuild explicit claim/evidence/premise/contradiction/open-question units.",
+                    max_tokens=self._resolve_output_max_tokens(),
+                    timeout_s=self._resolve_llm_timeout_seconds(),
+                    failure_mode=failure_mode,
+                    backend=backend,
+                    model=model,
+                )
+                raw_candidates.extend(
+                    self._map_argument_units_to_candidates(
+                        units=units,
                         parsed=parsed,
-                        failure_mode=failure_mode,
+                        trace=latest_trace,
+                        request_id=request_id,
                     )
-                    latest_trace = trace_result
-                    raw_candidates.extend(llm_candidates)
-                except ResearchLLMError as exc:
-                    if allow_fallback and exc.error_code in _EXTRACTION_FALLBACK_ALLOWED_ERRORS:
-                        build_fallback = getattr(extractor, "build_fallback_candidates", None)
-                        if not callable(build_fallback):
-                            build_fallback = getattr(extractor, "extract")
-                        fallback_candidates = build_fallback(parsed)
-                        fallback_used = True
-                        degraded = True
-                        degraded_reason = exc.error_code
-                        partial_failure_count += 1
-                        raw_candidates.extend(
-                            [
-                                {
-                                    "candidate_type": item.candidate_type,
-                                    "text": item.text,
-                                    "source_span": asdict(item.source_span),
-                                    "extractor_name": item.extractor_name,
-                                    "provider_backend": latest_trace.provider_backend
-                                    if latest_trace
-                                    else self._resolve_backend_hint(),
-                                    "provider_model": latest_trace.provider_model
-                                    if latest_trace
-                                    else "fallback_parser",
-                                    "request_id": request_id,
-                                    "llm_response_id": (
-                                        latest_trace.llm_response_id
-                                        if latest_trace and latest_trace.llm_response_id
-                                        else request_id
-                                    ),
-                                    "usage": (
-                                        _normalized_usage(latest_trace.usage)
-                                        if latest_trace
-                                        else _normalized_usage(None)
-                                    ),
-                                    "fallback_used": True,
-                                    "degraded": True,
-                                    "degraded_reason": degraded_reason,
-                                }
-                                for item in fallback_candidates
-                            ]
-                        )
-                        continue
+                )
+                await RelationExtractionService(self._gateway).rebuild_relations(
+                    request_id=request_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    units=units,
+                    chunk_text=prompt_chunk,
+                    max_tokens=self._resolve_output_max_tokens(),
+                    timeout_s=self._resolve_llm_timeout_seconds(),
+                    failure_mode=failure_mode,
+                    backend=backend,
+                    model=model,
+                )
+            except ResearchLLMError as exc:
+                if allow_fallback and exc.error_code in _EXTRACTION_FALLBACK_ALLOWED_ERRORS:
+                    fallback_used = True
+                    degraded = True
+                    degraded_reason = exc.error_code
+                    partial_failure_count += 1
+                else:
                     raise
 
             raw_candidates = self._dedupe_candidates(raw_candidates)
@@ -422,6 +419,97 @@ class ExtractionWorker:
             error=error,
         )
         return {"status": "failed", "candidate_batch_id": batch_id, "error": error}
+
+    def _map_argument_units_to_candidates(
+        self,
+        *,
+        units: list[dict[str, object]],
+        parsed: ParsedSource,
+        trace: LLMCallResult,
+        request_id: str,
+    ) -> list[dict[str, object]]:
+        candidates: list[dict[str, object]] = []
+        for unit in units:
+            quote = str(unit.get("quote") or unit.get("text") or "").strip()
+            text = self._normalize_candidate_text(str(unit.get("text") or quote))
+            if not text:
+                continue
+            start, end, matched_span_text = self._resolve_source_span(
+                parsed=parsed,
+                primary_query=quote,
+                secondary_query=text,
+            )
+            if start < 0 or end <= start:
+                continue
+            source_span = self._build_source_span(
+                parsed=parsed,
+                start=start,
+                end=end,
+                matched_span_text=matched_span_text,
+            )
+            candidates.append(
+                {
+                    "candidate_type": str(unit.get("candidate_type") or ""),
+                    "semantic_type": str(unit.get("semantic_type") or ""),
+                    "text": text,
+                    "quote": quote or matched_span_text,
+                    "source_span": source_span,
+                    "trace_refs": {"argument_unit_id": str(unit.get("unit_id") or "")},
+                    "extractor_name": "argument_unit_extractor",
+                    "provider_backend": trace.provider_backend,
+                    "provider_model": trace.provider_model,
+                    "request_id": trace.request_id or request_id,
+                    "llm_response_id": trace.llm_response_id,
+                    "usage": trace.usage,
+                    "fallback_used": trace.fallback_used,
+                    "degraded": trace.degraded,
+                    "degraded_reason": trace.degraded_reason,
+                }
+            )
+        return candidates
+
+    def _build_source_span(
+        self,
+        *,
+        parsed: ParsedSource,
+        start: int,
+        end: int,
+        matched_span_text: str,
+    ) -> dict[str, object]:
+        source_span: dict[str, object] = {
+            "start": start,
+            "end": end,
+            "text": matched_span_text,
+        }
+        for segment in parsed.segments:
+            if int(segment.start) <= start and int(segment.end) >= end:
+                if segment.page is not None:
+                    source_span["page"] = segment.page
+                if segment.block_id:
+                    source_span["block_id"] = segment.block_id
+                if segment.paragraph_id:
+                    source_span["paragraph_id"] = segment.paragraph_id
+                if segment.section_path:
+                    source_span["section_path"] = list(segment.section_path)
+                break
+        return source_span
+
+    def _build_anchor_refs(self, parsed: ParsedSource) -> list[dict[str, object]]:
+        refs: list[dict[str, object]] = []
+        for segment in parsed.segments[:100]:
+            ref: dict[str, object] = {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text[:240],
+            }
+            if segment.page is not None:
+                ref["page"] = segment.page
+            if segment.block_id:
+                ref["block_id"] = segment.block_id
+            if segment.paragraph_id:
+                ref["paragraph_id"] = segment.paragraph_id
+            refs.append(ref)
+        return refs
 
     async def _extract_via_llm(
         self,

@@ -1,0 +1,32 @@
+SYSTEM:
+You rebuild explicit argument relations between already extracted units.
+
+Rules:
+- Only connect units when the source text explicitly supports the relation.
+- Do not infer relations from unit type alone.
+- Every relation must include a quote explaining why the edge exists.
+- Use exactly these semantic_relation_type values when resolved: supports, relies_on, contradicts, leads_to.
+- If the text does not make the relation clear, use semantic_relation_type "unresolved".
+- Return JSON only.
+
+USER:
+workspace_id: {workspace_id}
+source_id: {source_id}
+
+units_json:
+{units_json}
+
+chunk_text:
+{chunk_text}
+
+Return this JSON shape:
+{
+  "relations": [
+    {
+      "source_unit_id": "u2",
+      "target_unit_id": "u1",
+      "semantic_relation_type": "supports",
+      "quote": "exact quote showing this relation"
+    }
+  ]
+}
