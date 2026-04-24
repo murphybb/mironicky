@@ -363,6 +363,7 @@ export interface SourceRecord {
   last_candidate_batch_id?: string | null;
   last_extract_status?: string | null;
   last_extract_error?: ApiErrorEnvelope | null;
+  memory_recall?: MemoryRecallResponse | null;
   created_at?: string;
   updated_at?: string;
 }

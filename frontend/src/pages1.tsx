@@ -912,10 +912,16 @@ export function RouteDetailPage({
                   claims {reportSummary.claim_count} · conflicts {reportSummary.conflict_count} · routes {reportSummary.route_count} · historical_recall {reportSummary.source_recall_count}
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  claims：{reportSections?.claims?.slice(0, 2).map((item) => item.text || item.normalized_text || item.claim_id).join('；') || '无'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
                   冲突：{reportSections?.conflicts?.slice(0, 2).map((item) => `${item.conflict_type}/${item.status}`).join('；') || '无'}
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
                   路线：{reportSections?.routes?.slice(0, 2).map((item) => normalizeRouteTitle(item.title)).join('；') || '无'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  未解缺口：{reportSections?.unresolved_gaps?.slice(0, 2).map((item) => item.reason || `${item.gap_type}/${item.status}`).join('；') || '无'}
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
                   历史召回：{reportSections?.historical_recall?.slice(0, 2).map((item) => `${item.status} ${item.item_total}/${item.total}`).join('；') || '无'}
@@ -1300,6 +1306,8 @@ export function ImportPage({ goto, showToast, workspaceId, onImportCompleted, on
                     <div className="src-detail-row">job_id: {src.last_extract_job_id || details.job_id || '无'}</div>
                     <div className="src-detail-row">candidate_batch_id: {src.last_candidate_batch_id || details.candidate_batch_id || '无'}</div>
                     <div className="src-detail-row">error: {errorMessage || '无'}</div>
+                    <div className="src-detail-row">历史召回状态：{src.memory_recall?.status || '未返回'}</div>
+                    <div style={{ marginTop: '8px' }}>{renderMemoryRecallSection(src.memory_recall)}</div>
                     <div className="src-detail-row">
                       metadata.publication_year: {metadataCheck.publicationYear ?? '无'}
                       {metadataCheck.yearMismatch ? ` · 建议修正为 ${metadataCheck.suggestedYear}` : ''}
