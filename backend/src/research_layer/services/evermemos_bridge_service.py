@@ -376,9 +376,13 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
         top_k: int = 8,
         request_id: str | None = None,
         trace_refs: dict[str, object] | None = None,
+        reason: str | None = None,
     ) -> dict[str, object]:
         normalized_claim_ids = self._normalize_claim_ids(scope_claim_ids or [])
         normalized_query = " ".join(str(query_text or "").split())
+        context_refs = dict(trace_refs or {})
+        if reason and "reason" not in context_refs:
+            context_refs["reason"] = reason
         if scope_mode == "require" and not normalized_claim_ids:
             return self.failed(
                 workspace_id=workspace_id,
@@ -386,7 +390,7 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 reason="required_claim_scope_missing",
                 query_text=normalized_query,
                 request_id=request_id,
-                trace_refs=trace_refs,
+                trace_refs=context_refs,
             )
         if not normalized_query:
             return self.skipped(
@@ -395,7 +399,7 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 reason="missing_query_text",
                 query_text="",
                 request_id=request_id,
-                trace_refs=trace_refs,
+                trace_refs=context_refs,
             )
         return self.recall_for_claims(
             workspace_id=workspace_id,
@@ -404,8 +408,8 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
             requested_method=requested_method,
             top_k=top_k,
             request_id=request_id or f"recall::{workspace_id}::{scope_mode}",
-            context_type=str(trace_refs.get("context_type")) if isinstance(trace_refs, dict) and trace_refs.get("context_type") else "main_path",
-            context_ref=trace_refs,
+            context_type=str(context_refs.get("context_type") or "main_path"),
+            context_ref=context_refs,
             scope_mode=scope_mode,
         )
 

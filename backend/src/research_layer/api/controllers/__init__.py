@@ -8,6 +8,7 @@ __all__ = [
     "ResearchFailureController",
     "ResearchHypothesisController",
     "ResearchRetrievalController",
+    "ResearchGraphRAGController",
     "ResearchPackageController",
     "ResearchJobController",
 ]

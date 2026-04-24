@@ -7,8 +7,12 @@ from research_layer.api.controllers._state_store import STORE
 from research_layer.api.controllers.research_conflict_controller import (
     ResearchConflictController,
 )
+from research_layer.api.controllers.research_graphrag_controller import (
+    ResearchGraphRAGController,
+)
 from research_layer.api.controllers.research_job_controller import ResearchJobController
 from research_layer.api.controllers.research_source_controller import ResearchSourceController
+from research_layer.services.candidate_confirmation_service import normalize_candidate_text
 from research_layer.services.claim_conflict_service import ClaimConflictService
 from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
 from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
@@ -23,6 +27,7 @@ def _build_test_client() -> TestClient:
         ResearchSourceController(),
         ResearchJobController(),
         ResearchConflictController(),
+        ResearchGraphRAGController(),
     ):
         controller.register_to_app(app)
     return TestClient(app)
@@ -58,6 +63,83 @@ def _create_candidate(workspace_id: str, text: str) -> dict[str, object]:
             }
         ],
     )[0]
+
+
+def test_task5_graphrag_query_returns_answer_citations_and_memory_recall(
+    monkeypatch,
+) -> None:
+    def _fake_recall(self, **kwargs):
+        scoped_claim_ids = list(kwargs.get("scope_claim_ids") or [])
+        return {
+            "status": "completed",
+            "reason": None,
+            "requested_method": kwargs["requested_method"],
+            "applied_method": "hybrid",
+            "query_text": kwargs["query_text"],
+            "total": 1 if scoped_claim_ids else 0,
+            "items": [
+                {
+                    "memory_type": "event_log",
+                    "memory_id": "mem_graphrag_1",
+                    "score": 0.77,
+                    "title": "prior timeout context",
+                    "snippet": "shard imbalance was seen before",
+                    "linked_claim_refs": [
+                        {"claim_id": str(scoped_claim_ids[0])}
+                    ],
+                    "trace_refs": {},
+                }
+            ]
+            if scoped_claim_ids
+            else [],
+            "trace_refs": {"request_id": kwargs.get("request_id")},
+        }
+
+    monkeypatch.setattr(EverMemOSRecallService, "recall", _fake_recall)
+    client = _build_test_client()
+    workspace_id = "ws_task5_graphrag"
+    candidate = _create_candidate(
+        workspace_id,
+        "Shard imbalance increases timeout latency in retrieval.",
+    )
+    object_ref = STORE.create_confirmed_object_from_candidate(
+        candidate=candidate,
+        normalized_text=normalize_candidate_text(str(candidate["text"])),
+        request_id="req_task5_confirm",
+    )
+    claim = STORE.create_claim_from_candidate(
+        candidate=candidate,
+        normalized_text=normalize_candidate_text(str(candidate["text"])),
+    )
+    STORE.create_graph_node(
+        workspace_id=workspace_id,
+        node_type="evidence",
+        object_ref_type=str(object_ref["object_type"]),
+        object_ref_id=str(object_ref["object_id"]),
+        short_label="Timeout evidence",
+        full_description="Evidence that shard imbalance increases timeout latency",
+        claim_id=str(claim["claim_id"]),
+        source_ref={"source_id": str(candidate["source_id"])},
+    )
+
+    response = client.post(
+        "/api/v1/research/graphrag/query",
+        json={
+            "workspace_id": workspace_id,
+            "question": "What increases timeout latency?",
+            "limit": 8,
+        },
+        headers={"x-request-id": "req_task5_graphrag"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"].startswith("Based on")
+    assert payload["citations"]
+    assert payload["citations"][0]["claim_id"] == claim["claim_id"]
+    assert payload["citations"][0]["source_ref"]["source_id"] == candidate["source_id"]
+    assert payload["memory_recall"]["items"][0]["memory_id"] == "mem_graphrag_1"
+    assert payload["trace_refs"]["request_id"] == "req_task5_graphrag"
 
 
 def test_task2_source_import_response_and_store_include_memory_recall(monkeypatch) -> None:
