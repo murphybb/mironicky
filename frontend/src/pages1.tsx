@@ -124,12 +124,17 @@ function normalizeExtractionStatus(status?: string | null, errorCode?: string | 
   return getAsyncJobUiLabel(status, errorCode);
 }
 
+function isFailedExtractionStatus(status?: string | null) {
+  return ['failed', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
+}
+
 function normalizeDegradedReason(reason?: string | null) {
   const key = String(reason || '').trim().toLowerCase();
-  if (!key) return '本次结果使用了降级路径，请优先复核候选质量。';
-  if (key === 'research.llm_timeout') return '模型处理超时，本次结果由降级路径补齐，建议复核候选质量。';
-  if (key === 'research.llm_invalid_output') return '模型输出不稳定，本次结果由降级路径补齐，建议复核候选质量。';
-  return `本次结果触发了降级路径（${key}），建议复核候选质量。`;
+  if (!key) return '抽取质量存在异常，请优先复核候选质量。';
+  if (key === 'research.llm_timeout') return '模型处理超时，未完成的分支不会生成候选；请重试或检查模型服务。';
+  if (key === 'research.llm_invalid_output') return '模型输出不符合结构要求，未通过校验的内容不会入库。';
+  if (key === 'research.llm_failed') return '模型服务调用失败，未生成候选；请检查模型额度、密钥或服务状态。';
+  return `抽取能力异常（${key}），请复核候选质量或检查后端服务。`;
 }
 
 function normalizeSourceMountLabel(sourceSpan?: { mount?: string; desc?: string; text?: string } | null) {
@@ -1827,12 +1832,14 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
                       color: 'var(--text)',
                     }}
                   >
-                    降级提示：{normalizeDegradedReason(extractionContext.degradedReason)}
+                    抽取提示：{normalizeDegradedReason(extractionContext.degradedReason)}
                   </div>
                 )}
                 {Number(extractionContext.partialFailureCount || 0) > 0 && (
                   <div className="cand-desc" style={{ marginTop: '8px' }}>
-                    本次抽取有 {extractionContext.partialFailureCount} 个分支失败，但系统已保留当前可用候选，请重点复核。
+                    {isFailedExtractionStatus(extractionContext.status)
+                      ? `本次抽取有 ${extractionContext.partialFailureCount} 个分支失败，未生成可用候选，请检查上方失败原因后重试。`
+                      : `本次抽取有 ${extractionContext.partialFailureCount} 个分支失败，但系统已保留当前可用候选，请重点复核。`}
                   </div>
                 )}
                 {extractionContext.error?.message && (
