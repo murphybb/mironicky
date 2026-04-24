@@ -9,9 +9,11 @@ import {
   getAsyncJobUiLabel,
   getAsyncJobUiState,
   hydrateConfirmedCandidatesToGraph,
+  getRoute,
   listSources,
   pollJob,
   getErrorMessage,
+  type MemoryRecallResponse,
 } from './api';
 import { getCandidateBulkConfirmDialogCopy } from './candidate-bulk-actions-helpers';
 
@@ -151,6 +153,59 @@ function relationTagLabel(tag?: string) {
     upstream_inspiration: '上游启发',
   };
   return map[key] || '未标注';
+}
+
+function memoryTypeLabel(type?: string) {
+  const key = String(type || '').toLowerCase();
+  const map: Record<string, string> = {
+    episodic_memory: '历史记忆',
+    event_log: '事件记录',
+    foresight: '前瞻提示',
+  };
+  return map[key] || '相关记忆';
+}
+
+function renderMemoryRecallSection(memoryRecall?: MemoryRecallResponse | null) {
+  if (!memoryRecall) {
+    return <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>当前页面尚未返回相关检索结果。</div>;
+  }
+  if (memoryRecall.status === 'loading') {
+    return <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>正在检索历史记忆...</div>;
+  }
+  if (memoryRecall.status === 'failed') {
+    return <div style={{ fontSize: '12px', color: 'var(--red)', lineHeight: 1.6 }}>检索失败：{memoryRecall.reason || '未返回失败原因'}</div>;
+  }
+  if (memoryRecall.status === 'skipped') {
+    return <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>当前未触发相关检索：{memoryRecall.reason || '未满足检索条件'}</div>;
+  }
+  if (!memoryRecall.items?.length) {
+    return <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>已执行检索，但当前没有召回到可展示的历史记忆。</div>;
+  }
+  return (
+    <div style={{ display: 'grid', gap: '10px' }}>
+      <div style={{ fontSize: '11px', color: 'var(--text3)', lineHeight: 1.6 }}>
+        共召回 {memoryRecall.total} 条 · 请求方式 {memoryRecall.requested_method} · 实际方式 {memoryRecall.applied_method}
+      </div>
+      {memoryRecall.items.slice(0, 4).map((item) => (
+        <div
+          key={`${item.memory_type}-${item.memory_id}-${item.title}`}
+          style={{ border: '1px solid var(--border)', borderRadius: '10px', padding: '10px', background: 'var(--bg2)' }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '4px' }}>
+            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text)' }}>{item.title || '未命名记忆'}</div>
+            <div style={{ fontSize: '11px', color: 'var(--text3)', whiteSpace: 'nowrap' }}>
+              {memoryTypeLabel(item.memory_type)} · {Math.round((item.score || 0) * 100)}%
+            </div>
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>{item.snippet || '暂无摘要'}</div>
+          <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '6px', lineHeight: 1.5 }}>
+            {item.timestamp ? `时间：${formatDateTime(item.timestamp)} · ` : ''}
+            关联 claim：{item.linked_claim_refs?.map((ref) => ref.claim_id).join('、') || '无'}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function normalizeRouteSummary(summary?: string) {
@@ -446,6 +501,8 @@ export function RouteDetailPage({
   routes,
   selRoute,
   goto,
+  showToast,
+  workspaceId,
   onHypothesisDecision,
   hypotheses = [],
   failuresCount = 0,
@@ -454,6 +511,8 @@ export function RouteDetailPage({
   nodeTypeStats = {},
 }: any) {
   const r = routes[selRoute];
+  const [routeDetail, setRouteDetail] = useState<any>(null);
+  const [routeDetailStatus, setRouteDetailStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   if (!r) {
     const evidenceCount = Number(nodeTypeStats?.evidence || nodeTypeStats?.e || 0);
     const assumptionCount = Number(nodeTypeStats?.assumption || nodeTypeStats?.a || 0);
@@ -481,12 +540,38 @@ export function RouteDetailPage({
       </div>
     );
   }
+  useEffect(() => {
+    let cancelled = false;
+    const routeId = String(r?.route_id || '').trim();
+    if (!routeId || !workspaceId) {
+      setRouteDetail(null);
+      setRouteDetailStatus('idle');
+      return;
+    }
+    setRouteDetailStatus('loading');
+    getRoute(routeId, workspaceId)
+      .then((detail) => {
+        if (cancelled) return;
+        setRouteDetail(detail);
+        setRouteDetailStatus('ready');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRouteDetail(null);
+        setRouteDetailStatus('error');
+        showToast?.(getErrorMessage(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [r?.route_id, workspaceId, showToast]);
   const lvClass = r.confidence_grade === 'high' ? 'h' : r.confidence_grade === 'medium' ? 'm' : 'l';
+  const detailRoute = routeDetail || r;
 
   const routeHypotheses = useMemo(() => {
     if (!Array.isArray(hypotheses)) return [];
-    const routeId = String(r.route_id || '');
-    const routeNodeIds = new Set((Array.isArray(r.route_node_ids) ? r.route_node_ids : []).map(String));
+    const routeId = String(detailRoute.route_id || '');
+    const routeNodeIds = new Set((Array.isArray(detailRoute.route_node_ids) ? detailRoute.route_node_ids : []).map(String));
 
     const collectRefs = (value: unknown, bucket: Set<string>) => {
       if (!value) return;
@@ -523,29 +608,29 @@ export function RouteDetailPage({
 
     const scoped = (related.length > 0 ? related : hypotheses).filter((hyp: any) => isActionableHypothesis(hyp));
     return scoped.slice(0, 4);
-  }, [hypotheses, r.route_id, r.route_node_ids]);
+  }, [hypotheses, detailRoute.route_id, detailRoute.route_node_ids]);
 
-  const riskText = normalizeRiskText(r.risks?.[0]);
-  const assumptionCount = r.assumptions?.length || 0;
-  const riskCount = r.risks?.length || 0;
+  const riskText = normalizeRiskText(detailRoute.risks?.[0]);
+  const assumptionCount = detailRoute.assumptions?.length || 0;
+  const riskCount = detailRoute.risks?.length || 0;
 
   return (
     <div className="detail-layout">
       <div className="detail-main">
         <button className="back-btn" onClick={() => goto('routes')}>返回路线列表</button>
         <div className="hero-box">
-          <div className="hero-title">{normalizeRouteTitle(r.title)}</div>
+          <div className="hero-title">{normalizeRouteTitle(detailRoute.title)}</div>
           <div className="hero-meta">
-            <span className={`hero-score lv-${lvClass}`}>{r.confidence_score}</span>
+            <span className={`hero-score lv-${lvClass}`}>{detailRoute.confidence_score}</span>
             <span style={{ fontSize: '11px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>置信度</span>
-            <span className={`status-pill ${r.status === 'active' ? 'sp-active' : 'sp-stale'}`}>{r.status === 'active' ? '进行中' : '需更新'}</span>
-            {r.relation_tags?.[0] && <span className="status-pill" style={{ background: 'var(--blue-bg)', color: 'var(--blue)', borderColor: 'var(--blue-border)' }}>{relationTagLabel(r.relation_tags[0])}</span>}
+            <span className={`status-pill ${detailRoute.status === 'active' ? 'sp-active' : 'sp-stale'}`}>{detailRoute.status === 'active' ? '进行中' : '需更新'}</span>
+            {detailRoute.relation_tags?.[0] && <span className="status-pill" style={{ background: 'var(--blue-bg)', color: 'var(--blue)', borderColor: 'var(--blue-border)' }}>{relationTagLabel(detailRoute.relation_tags[0])}</span>}
           </div>
         </div>
 
         <div className="section">
-          <div className="sec-title">{`关键证据（${r.key_supports?.length || 0} / 6）`}</div>
-          {r.key_supports?.map((ev: any, i: number) => (
+          <div className="sec-title">{`关键证据（${detailRoute.key_supports?.length || 0} / 6）`}</div>
+          {detailRoute.key_supports?.map((ev: any, i: number) => (
             <div key={i} className="ev-card">
               <div className="ev-top">
                 <span className="ev-title">证据节点</span>
@@ -554,7 +639,7 @@ export function RouteDetailPage({
               <div className="ev-body">{ev}</div>
             </div>
           ))}
-          {!r.key_supports?.length && <div className="text-muted">暂无证据节点。</div>}
+          {!detailRoute.key_supports?.length && <div className="text-muted">暂无证据节点。</div>}
         </div>
 
         <div className="section">
@@ -564,8 +649,8 @@ export function RouteDetailPage({
               其中 {riskCount} 条涉及高风险提示，详见下方“冲突与风险”。
             </div>
           )}
-          {r.assumptions?.map((asm: any, i: number) => {
-            const isRisk = r.risks?.includes(asm);
+          {detailRoute.assumptions?.map((asm: any, i: number) => {
+            const isRisk = detailRoute.risks?.includes(asm);
             return (
               <div key={i} className="assume-card" style={!isRisk ? { borderColor: 'var(--border)', background: 'var(--bg2)' } : {}}>
                 <div className="assume-label" style={!isRisk ? { color: 'var(--text2)' } : {}}>{asm}</div>
@@ -575,7 +660,7 @@ export function RouteDetailPage({
               </div>
             );
           })}
-          {!r.assumptions?.length && <div className="text-muted">暂无推理前提。</div>}
+          {!detailRoute.assumptions?.length && <div className="text-muted">暂无推理前提。</div>}
         </div>
 
         <div className="section">
@@ -590,7 +675,7 @@ export function RouteDetailPage({
           <div className="sec-title">下一步验证动作</div>
           <div className="nv-box">
             <div className="nv-lbl">验证目标</div>
-            <div className="nv-text">{normalizeValidationAction(r.next_validation_action)}</div>
+            <div className="nv-text">{normalizeValidationAction(detailRoute.next_validation_action)}</div>
             <button className="nv-btn" onClick={() => goto(failuresCount > 0 ? 'failures' : 'workbench')}>
               {failuresCount > 0 ? '提交验证结果' : '前往工作台记录失败'}
             </button>
@@ -622,10 +707,16 @@ export function RouteDetailPage({
 
           <div className="side-hdr" style={{ margin: '0 -16px', padding: '12px 16px 10px' }}>相关检索</div>
           <div style={{ marginTop: '12px' }}>
-              <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6, marginBottom: '8px' }}>
-                当前路线标签：{(Array.isArray(r.relation_tags) ? r.relation_tags : []).map((item: string) => relationTagLabel(item)).join('、') || '无'}
-              </div>
-            <button className="btn" style={{ fontSize: '11px', width: '100%' }} onClick={() => goto('import')}>查看来源材料</button>
+            <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6, marginBottom: '8px' }}>
+              当前路线标签：{(Array.isArray(detailRoute.relation_tags) ? detailRoute.relation_tags : []).map((item: string) => relationTagLabel(item)).join('、') || '无'}
+            </div>
+            {routeDetailStatus === 'loading' ? (
+              <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>正在读取路线相关记忆...</div>
+            ) : routeDetailStatus === 'error' ? (
+              <div style={{ fontSize: '12px', color: 'var(--red)', lineHeight: 1.6 }}>读取路线相关记忆失败，请稍后重试。</div>
+            ) : (
+              renderMemoryRecallSection(detailRoute.memory_recall)
+            )}
           </div>
         </div>
       </div>

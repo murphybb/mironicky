@@ -15,6 +15,8 @@ import {
   getGraphPredictedLinks,
   getGraphDeepChains,
   getGraphReport,
+  queryGraph,
+  type MemoryRecallResponse,
 } from './api';
 import { normalizeGraphInspectorPayloads } from './graph-inspector-helpers';
 import {
@@ -68,6 +70,8 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     error: null,
     data: null,
   });
+  const [nodeMemoryRecall, setNodeMemoryRecall] = useState<MemoryRecallResponse | null>(null);
+  const [nodeMemoryRecallStatus, setNodeMemoryRecallStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
 
   useEffect(() => {
     setPinnedPositions(loadPinnedPositions(workspaceId));
@@ -130,6 +134,50 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
           error: getErrorMessage(error),
           data: null,
         });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selNode?.node_id, workspaceId]);
+
+  useEffect(() => {
+    if (!selNode?.node_id) {
+      setNodeMemoryRecall(null);
+      setNodeMemoryRecallStatus('idle');
+      return;
+    }
+    let cancelled = false;
+    setNodeMemoryRecallStatus('loading');
+    queryGraph(workspaceId, selNode.node_id, 1)
+      .then((graph) => {
+        if (cancelled) return;
+        setNodeMemoryRecall(
+          graph?.memory_recall || {
+            status: 'skipped',
+            requested_method: 'auto',
+            applied_method: 'none',
+            reason: '节点查询未返回相关记忆',
+            query_text: String(selNode?.short_label || selNode?.node_id || ''),
+            total: 0,
+            items: [],
+            trace_refs: {},
+          }
+        );
+        setNodeMemoryRecallStatus('ready');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setNodeMemoryRecall({
+          status: 'failed',
+          requested_method: 'auto',
+          applied_method: 'none',
+          reason: getErrorMessage(error),
+          query_text: String(selNode?.short_label || selNode?.node_id || ''),
+          total: 0,
+          items: [],
+          trace_refs: {},
+        });
+        setNodeMemoryRecallStatus('error');
       });
     return () => {
       cancelled = true;
@@ -506,6 +554,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     };
     return map[key] || type;
   };
+  const memoryTypeLabel = (type?: string) => {
+    const key = String(type || '').toLowerCase();
+    if (key === 'episodic_memory') return '事件记忆';
+    if (key === 'profile') return '画像记忆';
+    if (key === 'foresight') return '前瞻记忆';
+    if (key === 'event_log') return '事件日志';
+    return type || '未分类记忆';
+  };
   const inspectorData = inspectorState.data;
   const renderInsightItems = (items: any[], emptyText: string) => {
     if (!items.length) return <div className="insight-empty">{emptyText}</div>;
@@ -530,6 +586,38 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
         </div>
       );
     });
+  };
+  const renderMemoryRecallItems = (memoryRecall?: MemoryRecallResponse | null) => {
+    if (!memoryRecall) {
+      return <div className="insight-empty">当前节点尚未返回相关记忆。</div>;
+    }
+    if (memoryRecall.status === 'loading') {
+      return <div className="insight-empty">正在检索相关记忆...</div>;
+    }
+    if (memoryRecall.status === 'failed') {
+      return <div className="insight-error">检索失败：{memoryRecall.reason || '未返回失败原因'}</div>;
+    }
+    if (memoryRecall.status === 'skipped') {
+      return <div className="insight-empty">当前未触发相关检索：{memoryRecall.reason || '未满足检索条件'}</div>;
+    }
+    if (!memoryRecall.items?.length) {
+      return <div className="insight-empty">已执行检索，但没有召回到可展示的历史记忆。</div>;
+    }
+    return (
+      <>
+        <div className="insight-row-detail">
+          共召回 {memoryRecall.total} 条 · 请求方式 {memoryRecall.requested_method} · 实际方式 {memoryRecall.applied_method}
+        </div>
+        {memoryRecall.items.slice(0, 4).map((item, index) => (
+          <div className="insight-row" key={`${item.memory_id || item.memory_type}-${index}`}>
+            <div className="insight-row-title">{memoryTypeLabel(item.memory_type)}</div>
+            <div className="insight-row-detail">
+              {item.snippet || item.title || '未返回摘要'}{item.score ? ` · 相关度 ${Math.round(Number(item.score || 0) * 100)}%` : ''}
+            </div>
+          </div>
+        ))}
+      </>
+    );
   };
   const hasActionableGraph = nodes.length > 1 && edges.length > 0;
   const canEnterEdgeMode = nodes.length >= 2;
@@ -685,6 +773,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
                             </div>
                           </div>
                         </div>
+                      )}
+                    </div>
+                    <div className="insp-section">
+                      <div className="insp-sec-lbl">相关记忆</div>
+                      {nodeMemoryRecallStatus === 'loading' ? (
+                        <div className="insight-empty">正在检索相关记忆...</div>
+                      ) : (
+                        renderMemoryRecallItems(nodeMemoryRecall)
                       )}
                     </div>
                   </>

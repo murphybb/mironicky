@@ -1274,6 +1274,8 @@ export default function App() {
               routes={routes}
               selRoute={selRoute}
               goto={goto}
+              showToast={showToast}
+              workspaceId={workspaceId}
               hypotheses={hypotheses}
               failuresCount={failures.length}
               nodeCount={nodes.length}

@@ -31,6 +31,32 @@ export interface FactorBreakdown {
   status?: string;
 }
 
+export interface MemoryRecallClaimRef {
+  claim_id: string;
+}
+
+export interface MemoryRecallItem {
+  memory_type: string;
+  memory_id: string;
+  score: number;
+  title: string;
+  snippet: string;
+  timestamp?: string | null;
+  linked_claim_refs: MemoryRecallClaimRef[];
+  trace_refs: Record<string, unknown>;
+}
+
+export interface MemoryRecallResponse {
+  status: string;
+  requested_method: string;
+  applied_method: string;
+  reason?: string | null;
+  query_text: string;
+  total: number;
+  items: MemoryRecallItem[];
+  trace_refs: Record<string, unknown>;
+}
+
 export interface RouteRecord {
   route_id: string;
   workspace_id: string;
@@ -50,6 +76,7 @@ export interface RouteRecord {
   route_edge_ids?: string[];
   degraded?: boolean;
   stale?: boolean;
+  memory_recall?: MemoryRecallResponse | null;
 }
 
 export interface GraphNode {
@@ -84,6 +111,7 @@ export interface GraphResponse {
   workspace_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  memory_recall?: MemoryRecallResponse | null;
 }
 
 export interface CandidateRecord {
@@ -323,6 +351,38 @@ function normalizeRouteRecord(route: any): RouteRecord {
     route_edge_ids: Array.isArray(route?.route_edge_ids) ? route.route_edge_ids.map(String) : [],
     degraded: Boolean(route?.degraded),
     stale: Boolean(route?.stale),
+    memory_recall: normalizeMemoryRecall(route?.memory_recall),
+  };
+}
+
+function normalizeMemoryRecall(recall: any): MemoryRecallResponse | null {
+  if (!recall || typeof recall !== 'object') return null;
+  const items = Array.isArray(recall?.items)
+    ? recall.items.map((item: any) => ({
+        memory_type: String(item?.memory_type ?? ''),
+        memory_id: String(item?.memory_id ?? ''),
+        score: Number(item?.score ?? 0),
+        title: String(item?.title ?? ''),
+        snippet: String(item?.snippet ?? ''),
+        timestamp: item?.timestamp == null ? null : String(item.timestamp),
+        linked_claim_refs: Array.isArray(item?.linked_claim_refs)
+          ? item.linked_claim_refs
+              .map((ref: any) => ({ claim_id: String(ref?.claim_id ?? '') }))
+              .filter((ref: MemoryRecallClaimRef) => Boolean(ref.claim_id))
+          : [],
+        trace_refs: item?.trace_refs && typeof item.trace_refs === 'object' ? item.trace_refs : {},
+      }))
+    : [];
+
+  return {
+    status: String(recall?.status ?? ''),
+    requested_method: String(recall?.requested_method ?? ''),
+    applied_method: String(recall?.applied_method ?? ''),
+    reason: recall?.reason == null ? null : String(recall.reason),
+    query_text: String(recall?.query_text ?? ''),
+    total: Number(recall?.total ?? items.length),
+    items,
+    trace_refs: recall?.trace_refs && typeof recall.trace_refs === 'object' ? recall.trace_refs : {},
   };
 }
 
@@ -341,6 +401,7 @@ function normalizeGraph(graph: any): GraphResponse {
     workspace_id: String(graph?.workspace_id ?? ''),
     nodes: normalizedNodes,
     edges: edges as GraphEdge[],
+    memory_recall: normalizeMemoryRecall(graph?.memory_recall),
   };
 }
 
@@ -666,6 +727,17 @@ export async function getRoutePreview(routeId: string, workspaceId: string): Pro
 
 export async function getGraph(workspaceId: string): Promise<GraphResponse> {
   const data = await request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}`);
+  return normalizeGraph(data);
+}
+
+export async function queryGraph(workspaceId: string, centerNodeId: string, maxHops = 1): Promise<GraphResponse> {
+  const data = await request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/query`, {
+    method: 'POST',
+    body: {
+      center_node_id: centerNodeId,
+      max_hops: maxHops,
+    },
+  });
   return normalizeGraph(data);
 }
 
