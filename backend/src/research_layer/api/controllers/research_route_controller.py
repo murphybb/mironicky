@@ -158,11 +158,17 @@ class ResearchRouteController(BaseController):
         route: dict[str, object],
         node_map: dict[str, dict[str, object]],
         conflicts: list[dict[str, object]] | None = None,
+        conflict_index: dict[str, list[dict[str, object]]] | None = None,
     ) -> dict[str, object]:
         claim_ids = self._route_scope_claim_ids(route=route, node_map=node_map)
         challenge_route = {**route, "claim_ids": claim_ids}
         workspace_id = str(route["workspace_id"])
-        if conflicts is None:
+        if conflict_index is not None:
+            challenge = self._route_challenge_service.evaluate_route_with_conflict_index(
+                route=challenge_route,
+                conflict_index=conflict_index,
+            )
+        elif conflicts is None:
             challenge = self._route_challenge_service.evaluate_route(
                 workspace_id=workspace_id,
                 route=challenge_route,
@@ -205,12 +211,16 @@ class ResearchRouteController(BaseController):
 
         node_map = self._route_node_map(workspace_id=workspace)
         conflicts = STORE.list_claim_conflicts(workspace_id=workspace)
+        conflict_index = self._route_challenge_service.build_conflict_index(
+            workspace_id=workspace,
+            conflicts=conflicts,
+        )
         items = [
             RouteRecord.model_validate(
                 self._materialize_route_challenge(
                     route=route,
                     node_map=node_map,
-                    conflicts=conflicts,
+                    conflict_index=conflict_index,
                 )
             )
             for route in materialized

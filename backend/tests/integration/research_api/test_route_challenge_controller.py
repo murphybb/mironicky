@@ -146,6 +146,7 @@ def test_list_routes_returns_claim_ids_and_challenge_refs(monkeypatch) -> None:
     item = response.json()["items"][0]
     assert item["claim_ids"] == [seeded["claim"]["claim_id"]]
     assert item["challenge_status"] == "needs_review"
+    assert item["challenge_refs"]["conflict_count"] == 1
     assert item["challenge_refs"]["conflict_ids"] == [
         seeded["conflict"]["conflict_id"]
     ]
@@ -166,6 +167,7 @@ def test_get_route_returns_claim_ids_and_challenge_refs(monkeypatch) -> None:
     payload = response.json()
     assert payload["claim_ids"] == [seeded["claim"]["claim_id"]]
     assert payload["challenge_status"] == "needs_review"
+    assert payload["challenge_refs"]["conflict_count"] == 1
     assert payload["challenge_refs"]["conflict_ids"] == [
         seeded["conflict"]["conflict_id"]
     ]
