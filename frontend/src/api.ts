@@ -127,6 +127,106 @@ export interface GraphRAGResponse {
   trace_refs: Record<string, unknown>;
 }
 
+export interface IdSample {
+  total: number;
+  items: string[];
+  truncated: boolean;
+}
+
+export interface CompactMappingSummary {
+  keys: string[];
+  total_keys: number;
+  truncated: boolean;
+}
+
+export interface CrossDocumentClaimItem {
+  claim_id: string;
+  source_id: string;
+  candidate_id: string;
+  claim_type: string;
+  semantic_type?: string | null;
+  text: string;
+  normalized_text: string;
+  status: string;
+  source_span: {
+    start?: number | null;
+    end?: number | null;
+  };
+  trace_summary: CompactMappingSummary;
+  memory_summary: CompactMappingSummary;
+}
+
+export interface CrossDocumentConflictItem {
+  conflict_id: string;
+  new_claim_id: string;
+  existing_claim_id: string;
+  conflict_type: string;
+  status: string;
+  evidence: Record<string, unknown>;
+  source_ref: Record<string, unknown>;
+  decision_note?: string | null;
+  created_request_id?: string | null;
+  resolved_request_id?: string | null;
+}
+
+export interface CrossDocumentHistoricalRecallItem {
+  recall_id: string;
+  source_id: string;
+  status: string;
+  reason?: string | null;
+  requested_method?: string | null;
+  applied_method?: string | null;
+  query_text: string;
+  total: number;
+  item_total: number;
+  items: Array<{
+    memory_id?: string | null;
+    memory_type?: string | null;
+    score?: number | null;
+    title?: string | null;
+    snippet?: string | null;
+    linked_claim_refs: Array<{ claim_id?: string | null }>;
+    source_ref: Record<string, unknown>;
+  }>;
+  items_truncated: boolean;
+  trace_refs: CompactMappingSummary;
+  error?: Record<string, unknown> | null;
+  request_id?: string | null;
+}
+
+export interface CrossDocumentRouteItem {
+  route_id: string;
+  title: string;
+  summary: string;
+  status: string;
+  conclusion: string;
+  claim_ids: string[];
+  route_node_ids: IdSample;
+  route_edge_ids: IdSample;
+  version_id?: string | null;
+  request_id?: string | null;
+}
+
+export interface CrossDocumentChallengedRouteItem extends CrossDocumentRouteItem {
+  challenge_status: string;
+  challenge_refs: {
+    conflict_count: number;
+    conflict_ids: IdSample;
+  };
+}
+
+export interface CrossDocumentUnresolvedGapItem {
+  gap_type: string;
+  status: string;
+  conflict_id?: string | null;
+  claim_ids: string[];
+  recall_id?: string | null;
+  source_id?: string | null;
+  reason?: string | null;
+  route_id?: string | null;
+  conflict_ids?: IdSample | null;
+}
+
 export interface CrossDocumentReportResponse {
   workspace_id: string;
   summary: {
@@ -136,40 +236,30 @@ export interface CrossDocumentReportResponse {
     route_count: number;
     challenged_route_count: number;
     unresolved_gap_count: number;
-    section_limits?: Record<string, number>;
+    section_limits: {
+      claims: number;
+      conflicts: number;
+      historical_recall: number;
+      routes: number;
+      challenged_routes: number;
+      unresolved_gaps: number;
+    };
   };
   sections: {
-    conflicts: ClaimConflictRecord[];
-    historical_recall: Array<{
-      recall_id: string;
-      source_id: string;
-      status: string;
-      query_text: string;
-      total: number;
-      item_total: number;
-      reason?: string | null;
-    }>;
-    routes: Array<{
-      route_id: string;
-      title: string;
-      summary: string;
-      status: string;
-      conclusion?: string;
-      claim_ids?: string[];
-    }>;
-    challenged_routes: Array<{
-      route_id: string;
-      title: string;
-      summary: string;
-      status: string;
-      challenge_status: string;
-      challenge_refs?: {
-        conflict_count: number;
-        conflict_ids?: { items?: string[]; total?: number; truncated?: boolean } | string[];
-      };
-    }>;
+    claims: CrossDocumentClaimItem[];
+    conflicts: CrossDocumentConflictItem[];
+    historical_recall: CrossDocumentHistoricalRecallItem[];
+    routes: CrossDocumentRouteItem[];
+    challenged_routes: CrossDocumentChallengedRouteItem[];
+    unresolved_gaps: CrossDocumentUnresolvedGapItem[];
   };
-  trace_refs?: Record<string, unknown>;
+  trace_refs: {
+    request_id: string;
+    claim_ids: IdSample;
+    conflict_ids: IdSample;
+    source_recall_ids: IdSample;
+    route_ids: IdSample;
+  };
 }
 
 export interface GraphNode {
