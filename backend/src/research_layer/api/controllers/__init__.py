@@ -4,6 +4,7 @@ __all__ = [
     "ResearchSourceController",
     "ResearchRouteController",
     "ResearchGraphController",
+    "ResearchConflictController",
     "ResearchFailureController",
     "ResearchHypothesisController",
     "ResearchRetrievalController",

@@ -4,9 +4,13 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from core.observation.logger import get_logger
 from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.claim_conflict_service import ClaimConflictService
 from research_layer.services.evermemos_bridge_service import ResearchMemoryBridge
 from research_layer.services.scholarly_source_service import ScholarlySourceService
+
+logger = get_logger(__name__)
 
 
 def normalize_candidate_text(text: str) -> str:
@@ -31,6 +35,7 @@ class CandidateConfirmationService:
         self._active_statuses = {"active", "weakened", "conflicted", "failed"}
         self._scholarly_source_service = ScholarlySourceService(store)
         self._memory_bridge = ResearchMemoryBridge(store)
+        self._claim_conflict_service = ClaimConflictService(store)
 
     def _node_type_for_object_type(self, object_type: str) -> str:
         return {
@@ -532,6 +537,65 @@ class CandidateConfirmationService:
                 details={"candidate_id": candidate["candidate_id"], "status": candidate["status"]},
             )
 
+    def _detect_claim_conflicts_best_effort(
+        self,
+        *,
+        workspace_id: str,
+        claim: dict[str, object],
+        candidate: dict[str, object],
+        request_id: str,
+    ) -> None:
+        try:
+            existing_claim_ids = [
+                str(item["claim_id"])
+                for item in self._store.list_claims(workspace_id)
+                if str(item["claim_id"]) != str(claim["claim_id"])
+            ]
+            result = self._claim_conflict_service.detect_for_claim(
+                workspace_id=workspace_id,
+                new_claim_id=str(claim["claim_id"]),
+                candidate_claim_ids=existing_claim_ids[:50],
+                request_id=request_id,
+            )
+            self._store.emit_event(
+                event_name="claim_conflict_detection_completed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                source_id=str(candidate["source_id"]),
+                candidate_batch_id=candidate.get("candidate_batch_id"),
+                component="candidate_confirmation_service",
+                step="claim_conflict_detection",
+                status="completed",
+                refs={
+                    "claim_id": claim["claim_id"],
+                    "created_count": result["created_count"],
+                    "conflict_ids": result["conflict_ids"],
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive best-effort guard
+            logger.exception(
+                "claim conflict detection failed for claim_id=%s workspace_id=%s",
+                claim.get("claim_id"),
+                workspace_id,
+            )
+            self._store.emit_event(
+                event_name="claim_conflict_detection_completed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                source_id=str(candidate["source_id"]),
+                candidate_batch_id=candidate.get("candidate_batch_id"),
+                component="candidate_confirmation_service",
+                step="claim_conflict_detection",
+                status="failed",
+                refs={
+                    "claim_id": claim["claim_id"],
+                    "reason": "claim_conflict_detection_exception",
+                },
+                error={"message": str(exc)},
+            )
+
     def confirm(
         self,
         *,
@@ -731,6 +795,12 @@ class CandidateConfirmationService:
                 "reason": "bridge_service_exception",
                 "last_error": {"message": str(exc)},
             }
+        self._detect_claim_conflicts_best_effort(
+            workspace_id=workspace_id,
+            claim=claim,
+            candidate=candidate,
+            request_id=request_id,
+        )
         return {
             "candidate_id": candidate_id,
             "candidate_status": "confirmed",

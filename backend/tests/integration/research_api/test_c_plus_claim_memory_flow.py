@@ -4,6 +4,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from research_layer.api.controllers._state_store import STORE
+from research_layer.api.controllers.research_conflict_controller import (
+    ResearchConflictController,
+)
 from research_layer.api.controllers.research_job_controller import ResearchJobController
 from research_layer.api.controllers.research_source_controller import ResearchSourceController
 from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
@@ -15,9 +18,45 @@ from research_layer.workers.extraction_worker import ExtractionWorker
 def _build_test_client() -> TestClient:
     STORE.reset_all()
     app = FastAPI()
-    for controller in (ResearchSourceController(), ResearchJobController()):
+    for controller in (
+        ResearchSourceController(),
+        ResearchJobController(),
+        ResearchConflictController(),
+    ):
         controller.register_to_app(app)
     return TestClient(app)
+
+
+def _create_candidate(workspace_id: str, text: str) -> dict[str, object]:
+    source = STORE.create_source(
+        workspace_id=workspace_id,
+        source_type="paper",
+        title=text[:40],
+        content=text,
+        metadata={},
+        import_request_id="req_task3_candidate",
+    )
+    batch = STORE.create_candidate_batch(
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id="job_task3_candidate",
+        request_id="req_task3_candidate",
+    )
+    return STORE.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id="job_task3_candidate",
+        candidates=[
+            {
+                "candidate_type": "evidence",
+                "text": text,
+                "source_span": {"start": 0, "end": len(text)},
+                "trace_refs": {"source_id": source["source_id"]},
+                "extractor_name": "test_task3",
+            }
+        ],
+    )[0]
 
 
 def test_task2_source_import_response_and_store_include_memory_recall(monkeypatch) -> None:
@@ -69,6 +108,97 @@ def test_task2_source_import_response_and_store_include_memory_recall(monkeypatc
     assert len(stored) == 1
     assert stored[0]["request_id"] == "req_task2_import"
     assert stored[0]["query_text"] == "Claim: brand attitude changes when prior context is recalled."
+
+
+def test_task3_conflict_api_lists_and_patches_review_state() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_task3_api"
+    first = _create_candidate(workspace_id, "Brand trust increases purchase intention.")
+    old_claim = STORE.create_claim_from_candidate(
+        candidate=first,
+        normalized_text=str(first["text"]).lower(),
+    )
+    second = _create_candidate(
+        workspace_id,
+        "Brand trust does not increase purchase intention.",
+    )
+    new_claim = STORE.create_claim_from_candidate(
+        candidate=second,
+        normalized_text=str(second["text"]).lower(),
+    )
+    conflict = STORE.create_claim_conflict(
+        workspace_id=workspace_id,
+        new_claim_id=str(new_claim["claim_id"]),
+        existing_claim_id=str(old_claim["claim_id"]),
+        conflict_type="possible_contradiction",
+        status="needs_review",
+        evidence={"detector": "test", "new_text": new_claim["text"]},
+        source_ref={"new_claim_id": new_claim["claim_id"]},
+        created_request_id="req_task3_api",
+    )
+
+    listed = client.get(f"/api/v1/research/conflicts/{workspace_id}")
+
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["conflict_id"] == conflict["conflict_id"]
+    assert listed.json()["items"][0]["status"] == "needs_review"
+
+    patched = client.patch(
+        f"/api/v1/research/conflicts/{conflict['conflict_id']}",
+        json={
+            "workspace_id": workspace_id,
+            "status": "accepted",
+            "decision_note": "reviewed",
+        },
+        headers={"x-request-id": "req_task3_patch"},
+    )
+
+    assert patched.status_code == 200
+    payload = patched.json()
+    assert payload["status"] == "accepted"
+    assert payload["decision_note"] == "reviewed"
+    assert payload["resolved_request_id"] == "req_task3_patch"
+
+
+def test_task3_candidate_confirmation_creates_claim_conflict() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_task3_confirm"
+    old_candidate = _create_candidate(
+        workspace_id,
+        "Brand trust increases purchase intention.",
+    )
+    new_candidate = _create_candidate(
+        workspace_id,
+        "Brand trust does not increase purchase intention.",
+    )
+
+    first = client.post(
+        "/api/v1/research/candidates/confirm",
+        json={
+            "workspace_id": workspace_id,
+            "candidate_ids": [old_candidate["candidate_id"]],
+        },
+        headers={"x-request-id": "req_task3_first_confirm"},
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/api/v1/research/candidates/confirm",
+        json={
+            "workspace_id": workspace_id,
+            "candidate_ids": [new_candidate["candidate_id"]],
+        },
+        headers={"x-request-id": "req_task3_second_confirm"},
+    )
+    assert second.status_code == 200
+
+    listed = client.get(f"/api/v1/research/conflicts/{workspace_id}")
+
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert len(items) == 1
+    assert items[0]["status"] == "needs_review"
+    assert items[0]["conflict_type"] == "possible_contradiction"
+    assert items[0]["created_request_id"] == "req_task3_second_confirm"
 
 
 def test_source_import_succeeds_when_memory_recall_side_effect_raises(

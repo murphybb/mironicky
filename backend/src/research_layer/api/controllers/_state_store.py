@@ -356,6 +356,23 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS claim_conflicts (
+                conflict_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                new_claim_id TEXT NOT NULL,
+                existing_claim_id TEXT NOT NULL,
+                conflict_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                source_ref_json TEXT NOT NULL DEFAULT '{}',
+                decision_note TEXT,
+                created_request_id TEXT,
+                resolved_request_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS research_evidences (
                 evidence_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -942,6 +959,7 @@ class ResearchApiStateStore:
                 self._ensure_column(
                     conn, "source_memory_recall_results", "error_json", "TEXT"
                 )
+                self._ensure_column(conn, "claim_conflicts", "decision_note", "TEXT")
                 self._ensure_column(conn, "candidates", "candidate_batch_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extraction_job_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extractor_name", "TEXT")
@@ -1192,6 +1210,7 @@ class ResearchApiStateStore:
             "extraction_results",
             "routes",
             "claims",
+            "claim_conflicts",
             "research_evidences",
             "research_assumptions",
             "research_conclusions",
@@ -2511,6 +2530,130 @@ class ResearchApiStateStore:
             if claim is not None:
                 claims.append(claim)
         return claims
+
+    def create_claim_conflict(
+        self,
+        *,
+        workspace_id: str,
+        new_claim_id: str,
+        existing_claim_id: str,
+        conflict_type: str,
+        status: str,
+        evidence: dict[str, object],
+        source_ref: dict[str, object],
+        created_request_id: str | None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        conflict_id = self.gen_id("claimconf")
+        now = self._to_iso(self.now())
+        self._execute(
+            """
+            INSERT INTO claim_conflicts (
+                conflict_id, workspace_id, new_claim_id, existing_claim_id,
+                conflict_type, status, evidence_json, source_ref_json,
+                decision_note, created_request_id, resolved_request_id,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conflict_id,
+                workspace_id,
+                new_claim_id,
+                existing_claim_id,
+                conflict_type,
+                status,
+                self._dumps(evidence),
+                self._dumps(source_ref),
+                None,
+                created_request_id,
+                None,
+                now,
+                now,
+            ),
+            conn=conn,
+        )
+        conflict = self.get_claim_conflict(conflict_id, conn=conn)
+        assert conflict is not None
+        return conflict
+
+    def get_claim_conflict(
+        self, conflict_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM claim_conflicts WHERE conflict_id = ?",
+            (conflict_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return self._row_to_claim_conflict(row)
+
+    def list_claim_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        status: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM claim_conflicts WHERE workspace_id = ?"
+        params: list[object] = [workspace_id]
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC, conflict_id DESC"
+        return [
+            self._row_to_claim_conflict(row)
+            for row in self._fetchall(sql, tuple(params), conn=conn)
+        ]
+
+    def update_claim_conflict_status(
+        self,
+        *,
+        conflict_id: str,
+        workspace_id: str,
+        status: str,
+        decision_note: str | None,
+        resolved_request_id: str | None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        current = self.get_claim_conflict(conflict_id, conn=conn)
+        if current is None or str(current["workspace_id"]) != workspace_id:
+            return None
+        self._execute(
+            """
+            UPDATE claim_conflicts
+            SET status = ?, decision_note = ?, resolved_request_id = ?, updated_at = ?
+            WHERE conflict_id = ? AND workspace_id = ?
+            """,
+            (
+                status,
+                decision_note,
+                resolved_request_id,
+                self._to_iso(self.now()),
+                conflict_id,
+                workspace_id,
+            ),
+            conn=conn,
+        )
+        return self.get_claim_conflict(conflict_id, conn=conn)
+
+    def _row_to_claim_conflict(self, row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "conflict_id": row["conflict_id"],
+            "workspace_id": row["workspace_id"],
+            "new_claim_id": row["new_claim_id"],
+            "existing_claim_id": row["existing_claim_id"],
+            "conflict_type": row["conflict_type"],
+            "status": row["status"],
+            "evidence": self._loads_dict(row["evidence_json"]),
+            "source_ref": self._loads_dict(row["source_ref_json"]),
+            "decision_note": row["decision_note"],
+            "created_request_id": row["created_request_id"],
+            "resolved_request_id": row["resolved_request_id"],
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
+        }
 
     def upsert_claim_memory_link(
         self,
