@@ -316,12 +316,35 @@ function normalizeSourceDerivedStatus(src: any): string {
   return sourceStatus;
 }
 
+function inferPublicationYearFromSourceText(text: string) {
+  const currentYear = new Date().getFullYear();
+  const candidates: Array<{ year: number; score: number }> = [];
+  for (const match of text.matchAll(/\b(?:19|20)\d{2}\b/g)) {
+    const raw = match[0];
+    const year = Number(raw);
+    const index = match.index ?? 0;
+    if (!Number.isFinite(year) || year < 1900 || year > currentYear + 1) continue;
+
+    const before = text.slice(Math.max(0, index - 36), index);
+    const after = text.slice(index + raw.length, Math.min(text.length, index + raw.length + 36));
+    if (/[-/]\s*$/.test(before) || /^\s*[-/]\d{2,4}/.test(after)) continue;
+
+    let score = 1;
+    const windowText = `${before}${raw}${after}`;
+    if (/文章著录格式|文章编号|出版|发表|期刊|商业经济研究|第\s*\d+\s*期/.test(windowText)) score += 6;
+    if (/参考文献|作者简介|基金课题/.test(windowText)) score -= 2;
+    candidates.push({ year, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score || b.year - a.year);
+  return candidates[0].year;
+}
+
 function inspectSourceMetadataConsistency(src: any) {
   const metadata = src?.metadata && typeof src.metadata === 'object' ? src.metadata : {};
   const publicationYear = Number((metadata as any)?.publication_year);
   const textForYear = `${src?.title || ''}\n${src?.content || ''}`;
-  const yearMatches = Array.from(new Set((textForYear.match(/\b(19|20)\d{2}\b/g) || []).map((item) => Number(item))));
-  const suggestedYear = yearMatches.length > 0 ? Math.max(...yearMatches) : null;
+  const suggestedYear = inferPublicationYearFromSourceText(textForYear);
   const yearMismatch =
     Number.isFinite(publicationYear) &&
     suggestedYear !== null &&
