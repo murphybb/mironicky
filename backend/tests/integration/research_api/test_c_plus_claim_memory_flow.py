@@ -393,14 +393,32 @@ def test_task6_cross_document_report_endpoint_returns_summary_and_sections() -> 
     assert payload["summary"]["conflict_count"] == 1
     assert payload["summary"]["source_recall_count"] == 1
     assert payload["sections"]["claims"][0]["claim_id"] == old_claim["claim_id"]
+    assert payload["sections"]["claims"][0]["trace_summary"]["keys"] == ["source_id"]
+    assert payload["sections"]["claims"][0]["memory_summary"]["keys"] == []
     assert payload["sections"]["conflicts"][0]["conflict_id"] == conflict["conflict_id"]
-    assert payload["sections"]["historical_recall"][0]["items"][0]["memory_id"] == "mem_task6_1"
+    historical_recall = payload["sections"]["historical_recall"][0]
+    assert historical_recall["item_total"] == 1
+    assert historical_recall["items_truncated"] is False
+    assert historical_recall["items"][0]["memory_id"] == "mem_task6_1"
     assert payload["sections"]["routes"][0]["route_id"] == route["route_id"]
     assert payload["sections"]["routes"][0]["route_node_ids"]["total"] == 1
+    assert payload["sections"]["routes"][0]["route_node_ids"]["items"] == [node["node_id"]]
+    assert payload["sections"]["routes"][0]["route_node_ids"]["truncated"] is False
     assert payload["sections"]["challenged_routes"][0]["route_id"] == route["route_id"]
     assert payload["sections"]["challenged_routes"][0]["challenge_status"] == "needs_review"
     assert payload["sections"]["unresolved_gaps"][0]["gap_type"] == "claim_conflict"
     assert payload["trace_refs"]["request_id"] == "req_task6_report"
+
+
+def test_task6_cross_document_report_openapi_uses_explicit_section_items() -> None:
+    client = _build_test_client()
+
+    schema = client.app.openapi()
+    sections = schema["components"]["schemas"]["CrossDocumentReportSections"]
+    claim_items = sections["properties"]["claims"]["items"]
+
+    assert "$ref" in claim_items
+    assert "additionalProperties" not in claim_items
 
 
 def test_task6_cross_document_report_rejects_invalid_workspace_id() -> None:

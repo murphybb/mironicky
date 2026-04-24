@@ -104,10 +104,11 @@ class CrossDocumentReportService:
             "claim_type": str(claim["claim_type"]),
             "semantic_type": claim.get("semantic_type"),
             "text": str(claim["text"]),
+            "normalized_text": str(claim["normalized_text"]),
             "status": str(claim["status"]),
             "source_span": claim.get("source_span", {}),
-            "trace_refs": self._compact_mapping(claim.get("trace_refs")),
-            "memory_link": self._compact_mapping(claim.get("memory_link")),
+            "trace_summary": self._compact_mapping(claim.get("trace_refs")),
+            "memory_summary": self._compact_mapping(claim.get("memory_link")),
         }
 
     def _conflict_ref(self, conflict: dict[str, object]) -> dict[str, object]:
@@ -201,8 +202,11 @@ class CrossDocumentReportService:
                 {
                     "route_id": str(route["route_id"]),
                     "title": str(route["title"]),
+                    "summary": str(route["summary"]),
                     "status": str(route["status"]),
                     "claim_ids": claim_ids,
+                    "route_node_ids": self._id_sample(route.get("route_node_ids", [])),
+                    "route_edge_ids": self._id_sample(route.get("route_edge_ids", [])),
                     "challenge_status": challenge["challenge_status"],
                     "challenge_refs": {
                         "conflict_count": challenge["conflict_count"],
@@ -286,20 +290,13 @@ class CrossDocumentReportService:
 
     def _compact_mapping(self, value: object) -> dict[str, object]:
         if not isinstance(value, dict):
-            return {}
-        compacted: dict[str, object] = {}
-        for key, item in value.items():
-            if isinstance(item, list):
-                compacted[str(key)] = self._id_sample(item)
-            elif isinstance(item, dict):
-                compacted[str(key)] = {
-                    "keys": list(item.keys())[:ID_SAMPLE_LIMIT],
-                    "total_keys": len(item),
-                    "truncated": len(item) > ID_SAMPLE_LIMIT,
-                }
-            else:
-                compacted[str(key)] = item
-        return compacted
+            return {"keys": [], "total_keys": 0, "truncated": False}
+        keys = [str(key) for key in value.keys()]
+        return {
+            "keys": keys[:ID_SAMPLE_LIMIT],
+            "total_keys": len(keys),
+            "truncated": len(keys) > ID_SAMPLE_LIMIT,
+        }
 
     def _as_dict_list(self, value: object) -> list[dict[str, object]]:
         if not isinstance(value, list):
