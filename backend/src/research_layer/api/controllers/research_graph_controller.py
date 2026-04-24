@@ -50,6 +50,10 @@ from research_layer.config.feature_flags import (
     is_feature_enabled,
 )
 from research_layer.graph.repository import GraphRepository
+from research_layer.services.claim_projection_guard_service import (
+    ClaimProjectionGuardError,
+    ClaimProjectionGuardService,
+)
 from research_layer.services.graph_build_service import GraphBuildService
 from research_layer.services.graph_query_service import GraphQueryService
 from research_layer.services.graph_report_service import GraphReportService
@@ -69,6 +73,30 @@ class ResearchGraphController(BaseController):
         self._report_service = GraphReportService(STORE)
         self._export_service = ResearchExportService(STORE)
         self._memory_recall_service = EverMemOSRecallService(STORE)
+        self._claim_guard = ClaimProjectionGuardService(STORE)
+
+    def _require_projection_claim(
+        self, *, workspace_id: str, claim_id: str | None
+    ) -> dict[str, object]:
+        try:
+            return self._claim_guard.require_claim(
+                workspace_id=workspace_id, claim_id=claim_id
+            )
+        except ClaimProjectionGuardError as exc:
+            raise_http_error(
+                status_code=exc.status_code,
+                code=ResearchErrorCode.INVALID_REQUEST.value,
+                message=exc.message,
+                details={"reason": exc.reason, **exc.details},
+            )
+
+    def _claim_source_ref(self, claim: dict[str, object]) -> dict[str, object]:
+        return {
+            "claim_id": claim["claim_id"],
+            "source_id": claim["source_id"],
+            "source_span": claim.get("source_span", {}),
+            "trace_refs": claim.get("trace_refs", {}),
+        }
 
     def _graph_memory_recall_for_full_graph(self, *, workspace_id: str) -> dict[str, object]:
         return self._memory_recall_service.skipped(
@@ -527,6 +555,9 @@ class ResearchGraphController(BaseController):
     async def create_graph_node(self, request: Request) -> GraphNodeResponse:
         payload = await parse_request_model(request, GraphNodeCreateRequest)
         request_id = get_request_id(request.headers.get("x-request-id"))
+        claim = self._require_projection_claim(
+            workspace_id=payload.workspace_id, claim_id=payload.claim_id
+        )
         node = self._repository.create_node(
             workspace_id=payload.workspace_id,
             node_type=payload.node_type,
@@ -537,6 +568,8 @@ class ResearchGraphController(BaseController):
             short_tags=payload.short_tags,
             visibility=payload.visibility,
             source_refs=payload.source_refs,
+            claim_id=str(claim["claim_id"]),
+            source_ref=self._claim_source_ref(claim),
         )
         self._repository.emit_event(
             event_name="graph_node_created",
@@ -630,6 +663,9 @@ class ResearchGraphController(BaseController):
     async def create_graph_edge(self, request: Request) -> GraphEdgeResponse:
         payload = await parse_request_model(request, GraphEdgeCreateRequest)
         request_id = get_request_id(request.headers.get("x-request-id"))
+        claim = self._require_projection_claim(
+            workspace_id=payload.workspace_id, claim_id=payload.claim_id
+        )
         source_node = self._repository.get_node(payload.source_node_id)
         target_node = self._repository.get_node(payload.target_node_id)
         ensure(
@@ -658,6 +694,8 @@ class ResearchGraphController(BaseController):
             object_ref_type=payload.object_ref_type,
             object_ref_id=payload.object_ref_id,
             strength=payload.strength,
+            claim_id=str(claim["claim_id"]),
+            source_ref=self._claim_source_ref(claim),
         )
         self._repository.emit_event(
             event_name="graph_edge_created",

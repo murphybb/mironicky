@@ -14,6 +14,7 @@ class GraphNodeCreateRequest(WorkspaceScopedBody):
     object_ref_id: str = Field(min_length=1)
     short_label: str = Field(min_length=1, max_length=128)
     full_description: str = Field(min_length=1)
+    claim_id: str | None = Field(default=None)
     short_tags: list[str] = Field(default_factory=list)
     visibility: str = Field(default="workspace", pattern=r"^(private|workspace|package_public)$")
     source_refs: list[dict[str, object]] = Field(default_factory=list)
@@ -53,6 +54,7 @@ class GraphEdgeCreateRequest(WorkspaceScopedBody):
     object_ref_type: str = Field(min_length=1)
     object_ref_id: str = Field(min_length=1)
     strength: float = Field(ge=0.0, le=1.0)
+    claim_id: str | None = Field(default=None)
 
 
 class GraphEdgePatchRequest(WorkspaceScopedBody):

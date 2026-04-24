@@ -88,6 +88,12 @@ def _import_extract_confirm(
     return candidate_ids
 
 
+def _first_claim_id(workspace_id: str) -> str:
+    claims = STORE.list_claims(workspace_id)
+    assert claims
+    return str(claims[0]["claim_id"])
+
+
 def test_slice5_dev_console_exposes_graph_workspace_query_and_updates() -> None:
     client = _build_test_client()
     response = client.get("/api/v1/research/dev-console")
@@ -129,6 +135,7 @@ def test_slice5_graph_build_query_and_update_flow() -> None:
     assert graph.status_code == 200
     graph_payload = graph.json()
     assert graph_payload["nodes"]
+    claim_id = str(graph_payload["nodes"][0]["claim_id"])
     assert all(node["object_ref_type"] for node in graph_payload["nodes"])
     assert all(node["object_ref_id"] for node in graph_payload["nodes"])
     assert all(edge["object_ref_type"] for edge in graph_payload["edges"])
@@ -155,6 +162,7 @@ def test_slice5_graph_build_query_and_update_flow() -> None:
                     "object_ref_id": "slice5_manual_edge_target",
                     "short_label": "Slice5 Manual Edge Target",
                     "full_description": "manual node to enable edge update path",
+                    "claim_id": claim_id,
                 },
             )
             assert extra_node.status_code == 200
@@ -169,6 +177,7 @@ def test_slice5_graph_build_query_and_update_flow() -> None:
                 "object_ref_type": "manual_link",
                 "object_ref_id": "slice5_manual_edge",
                 "strength": 0.8,
+                "claim_id": claim_id,
             },
         )
         assert created_edge.status_code == 200
@@ -248,6 +257,12 @@ def test_slice5_graph_build_query_and_update_flow() -> None:
 def test_slice5_graph_insight_endpoints_return_explicit_sections() -> None:
     client = _build_test_client()
     workspace_id = "ws_slice5_insights"
+    _import_extract_confirm(
+        client,
+        workspace_id=workspace_id,
+        content="Claim: manual graph insight objects are claim-backed.",
+    )
+    claim_id = _first_claim_id(workspace_id)
     first = client.post(
         "/api/v1/research/graph/nodes",
         json={
@@ -257,6 +272,7 @@ def test_slice5_graph_insight_endpoints_return_explicit_sections() -> None:
             "object_ref_id": "insight_evidence",
             "short_label": "Evidence",
             "full_description": "Evidence supports conclusion.",
+            "claim_id": claim_id,
         },
     )
     second = client.post(
@@ -268,6 +284,7 @@ def test_slice5_graph_insight_endpoints_return_explicit_sections() -> None:
             "object_ref_id": "insight_conclusion",
             "short_label": "Conclusion",
             "full_description": "Conclusion under review.",
+            "claim_id": claim_id,
         },
     )
     assert first.status_code == 200
@@ -284,6 +301,7 @@ def test_slice5_graph_insight_endpoints_return_explicit_sections() -> None:
             "object_ref_type": "manual_link",
             "object_ref_id": "insight_supports",
             "strength": 0.9,
+            "claim_id": claim_id,
         },
     )
     assert edge.status_code == 200
@@ -386,6 +404,7 @@ def test_track2_archive_delete_semantics_are_persistent_and_traceable() -> None:
     graph_before = client.get(f'/api/v1/research/graph/{workspace_id}')
     assert graph_before.status_code == 200
     node_before = graph_before.json()['nodes'][0]
+    claim_id = str(node_before['claim_id'])
     if not graph_before.json()['edges']:
         if len(graph_before.json()['nodes']) == 1:
             created_node = client.post(
@@ -397,6 +416,7 @@ def test_track2_archive_delete_semantics_are_persistent_and_traceable() -> None:
                     'object_ref_id': 'archive_manual_node',
                     'short_label': 'Archive Manual Node',
                     'full_description': 'manual node to satisfy archive edge path',
+                    'claim_id': claim_id,
                 },
             )
             assert created_node.status_code == 200
@@ -412,6 +432,7 @@ def test_track2_archive_delete_semantics_are_persistent_and_traceable() -> None:
                 'object_ref_type': 'manual_link',
                 'object_ref_id': 'archive_manual_edge',
                 'strength': 0.7,
+                'claim_id': claim_id,
             },
         )
         assert created_edge.status_code == 200
@@ -545,6 +566,7 @@ def test_slice5_graph_write_endpoints_convert_invalid_request_bodies_into_explic
     assert built.status_code == 200
     graph_payload = client.get(f"/api/v1/research/graph/{workspace_id}").json()
     node_id = graph_payload["nodes"][0]["node_id"]
+    claim_id = str(graph_payload["nodes"][0]["claim_id"])
     if not graph_payload["edges"]:
         if len(graph_payload["nodes"]) < 2:
             created_node = client.post(
@@ -556,6 +578,7 @@ def test_slice5_graph_write_endpoints_convert_invalid_request_bodies_into_explic
                     "object_ref_id": "node_invalid_body_seed",
                     "short_label": "Manual Seed Node",
                     "full_description": "Seed node for edge invalid body regression.",
+                    "claim_id": claim_id,
                 },
             )
             assert created_node.status_code == 200
@@ -570,6 +593,7 @@ def test_slice5_graph_write_endpoints_convert_invalid_request_bodies_into_explic
                 "object_ref_type": "manual_link",
                 "object_ref_id": "edge_invalid_body_seed",
                 "strength": 0.8,
+                "claim_id": claim_id,
             },
         )
         assert created_edge.status_code == 200
@@ -651,3 +675,85 @@ def test_slice5_graph_write_endpoints_convert_invalid_request_bodies_into_explic
             _assert_invalid_request_response(
                 missing_workspace_response, reason_fragment="workspace_id"
             )
+
+
+def test_slice5_graph_manual_create_requires_claim_id() -> None:
+    client = _build_test_client()
+
+    response = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": "ws_manual_claim_gate",
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_1",
+            "short_label": "Manual node",
+            "full_description": "Manual graph writes must bind a claim.",
+        },
+    )
+
+    payload = response.json().get("detail", response.json())
+    assert response.status_code == 400
+    assert payload["error_code"] == "research.invalid_request"
+    assert payload["details"]["reason"] == "missing_claim_id"
+
+
+def test_slice5_graph_manual_create_writes_claim_source_ref() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_manual_claim_source_ref"
+    _import_extract_confirm(
+        client,
+        workspace_id=workspace_id,
+        content="Claim: manual graph projections retain source provenance.",
+    )
+    claim_id = _first_claim_id(workspace_id)
+
+    first = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_source_ref_1",
+            "short_label": "Manual source ref 1",
+            "full_description": "Manual node with claim provenance.",
+            "claim_id": claim_id,
+        },
+    )
+    second = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_source_ref_2",
+            "short_label": "Manual source ref 2",
+            "full_description": "Second manual node with claim provenance.",
+            "claim_id": claim_id,
+        },
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    node_payload = first.json()
+    assert node_payload["claim_id"] == claim_id
+    assert node_payload["source_ref"]["claim_id"] == claim_id
+    assert {"source_id", "source_span", "trace_refs"} <= set(node_payload["source_ref"])
+
+    edge = client.post(
+        "/api/v1/research/graph/edges",
+        json={
+            "workspace_id": workspace_id,
+            "source_node_id": first.json()["node_id"],
+            "target_node_id": second.json()["node_id"],
+            "edge_type": "supports",
+            "object_ref_type": "manual_link",
+            "object_ref_id": "manual_source_ref_edge",
+            "strength": 0.8,
+            "claim_id": claim_id,
+        },
+    )
+    assert edge.status_code == 200
+    edge_payload = edge.json()
+    assert edge_payload["claim_id"] == claim_id
+    assert edge_payload["source_ref"]["claim_id"] == claim_id
+    assert {"source_id", "source_span", "trace_refs"} <= set(edge_payload["source_ref"])
