@@ -231,6 +231,22 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS source_memory_recall_results (
+                recall_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                requested_method TEXT,
+                applied_method TEXT,
+                total INTEGER NOT NULL,
+                items_json TEXT NOT NULL DEFAULT '[]',
+                trace_refs_json TEXT NOT NULL DEFAULT '{}',
+                request_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS candidates (
                 candidate_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -1163,6 +1179,7 @@ class ResearchApiStateStore:
             "sources",
             "source_artifacts",
             "source_hashes",
+            "source_memory_recall_results",
             "candidates",
             "extraction_results",
             "routes",
@@ -1290,6 +1307,11 @@ class ResearchApiStateStore:
             )
         latest_error = self._loads(latest_result["error_json"]) if latest_result is not None else None
         source_hash = self.get_source_hash_for_source(source_id, conn=conn)
+        memory_recall = self.get_latest_source_memory_recall_result(
+            workspace_id=str(row["workspace_id"]),
+            source_id=source_id,
+            conn=conn,
+        )
         return {
             "source_id": row["source_id"],
             "workspace_id": row["workspace_id"],
@@ -1305,6 +1327,7 @@ class ResearchApiStateStore:
             "last_extract_status": latest_result["status"] if latest_result is not None else None,
             "last_extract_error": latest_error if isinstance(latest_error, dict) else None,
             "source_hash": source_hash,
+            "memory_recall": memory_recall,
             "created_at": self._from_iso(row["created_at"]),
             "updated_at": self._from_iso(row["updated_at"]),
         }
@@ -1381,6 +1404,127 @@ class ResearchApiStateStore:
             "content_sha256": row["content_sha256"],
             "parser_name": row["parser_name"],
             "parser_version": row["parser_version"],
+            "created_at": self._from_iso(row["created_at"]),
+        }
+
+    def create_source_memory_recall_result(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        status: str,
+        reason: str | None,
+        requested_method: str | None,
+        applied_method: str | None,
+        total: int,
+        items: list[dict[str, object]] | None,
+        trace_refs: dict[str, object] | None,
+        request_id: str | None,
+        recall_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        resolved_recall_id = recall_id or self.gen_id("srcrecall")
+        self._execute(
+            """
+            INSERT INTO source_memory_recall_results (
+                recall_id, workspace_id, source_id, status, reason, requested_method,
+                applied_method, total, items_json, trace_refs_json, request_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_recall_id,
+                workspace_id,
+                source_id,
+                status,
+                reason,
+                requested_method,
+                applied_method,
+                int(total),
+                self._dumps(items or []),
+                self._dumps(trace_refs or {}),
+                request_id,
+                self._to_iso(self.now()),
+            ),
+            conn=conn,
+        )
+        record = self.get_source_memory_recall_result(
+            resolved_recall_id,
+            conn=conn,
+        )
+        assert record is not None
+        return record
+
+    def get_source_memory_recall_result(
+        self,
+        recall_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM source_memory_recall_results WHERE recall_id = ?",
+            (recall_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return self._source_memory_recall_result_row_to_dict(row)
+
+    def get_latest_source_memory_recall_result(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            """
+            SELECT *
+            FROM source_memory_recall_results
+            WHERE workspace_id = ? AND source_id = ?
+            ORDER BY created_at DESC, recall_id DESC
+            LIMIT 1
+            """,
+            (workspace_id, source_id),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return self._source_memory_recall_result_row_to_dict(row)
+
+    def list_source_memory_recall_results(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM source_memory_recall_results WHERE workspace_id = ?"
+        params: list[object] = [workspace_id]
+        if source_id is not None:
+            sql += " AND source_id = ?"
+            params.append(source_id)
+        sql += " ORDER BY created_at DESC, recall_id DESC"
+        return [
+            self._source_memory_recall_result_row_to_dict(row)
+            for row in self._fetchall(sql, tuple(params), conn=conn)
+        ]
+
+    def _source_memory_recall_result_row_to_dict(
+        self, row: sqlite3.Row
+    ) -> dict[str, object]:
+        return {
+            "recall_id": row["recall_id"],
+            "workspace_id": row["workspace_id"],
+            "source_id": row["source_id"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "requested_method": row["requested_method"],
+            "applied_method": row["applied_method"],
+            "total": int(row["total"] or 0),
+            "items": self._loads_list(row["items_json"]),
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
+            "request_id": row["request_id"],
             "created_at": self._from_iso(row["created_at"]),
         }
 

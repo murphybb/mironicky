@@ -1,0 +1,169 @@
+﻿from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from research_layer.api.controllers._state_store import STORE
+from research_layer.api.controllers.research_job_controller import ResearchJobController
+from research_layer.api.controllers.research_source_controller import ResearchSourceController
+from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
+from research_layer.testing.job_helpers import wait_for_job_terminal
+from research_layer.workers.extraction_worker import ExtractionWorker
+
+
+def _build_test_client() -> TestClient:
+    STORE.reset_all()
+    app = FastAPI()
+    for controller in (ResearchSourceController(), ResearchJobController()):
+        controller.register_to_app(app)
+    return TestClient(app)
+
+
+def test_task2_source_import_response_and_store_include_memory_recall(monkeypatch) -> None:
+    def _fake_recall(self, **kwargs):
+        return {
+            "status": "completed",
+            "reason": "logical_not_supported_by_evermemos",
+            "requested_method": kwargs["requested_method"],
+            "applied_method": "hybrid",
+            "total": 1,
+            "items": [
+                {
+                    "memory_type": "episodic_memory",
+                    "memory_id": "mem_import_1",
+                    "score": 0.88,
+                    "title": "historical claim",
+                    "snippet": "historical context",
+                    "linked_claim_refs": [{"claim_id": "claim_old"}],
+                    "trace_refs": {},
+                }
+            ],
+            "trace_refs": {"request_id": kwargs.get("request_id")},
+        }
+
+    monkeypatch.setattr(EverMemOSRecallService, "recall", _fake_recall)
+    client = _build_test_client()
+
+    response = client.post(
+        "/api/v1/research/sources/import",
+        json={
+            "workspace_id": "ws_task2_import",
+            "source_type": "paper",
+            "title": "Task2 import source",
+            "content": "Claim: brand attitude changes when prior context is recalled.",
+        },
+        headers={"x-request-id": "req_task2_import"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["memory_recall"]["status"] == "completed"
+    assert payload["memory_recall"]["items"][0]["memory_id"] == "mem_import_1"
+    stored = STORE.list_source_memory_recall_results(
+        workspace_id="ws_task2_import",
+        source_id=payload["source_id"],
+    )
+    assert len(stored) == 1
+    assert stored[0]["request_id"] == "req_task2_import"
+
+
+def test_task2_source_extract_persists_explicit_memory_recall(monkeypatch) -> None:
+    async def _fake_extract_run(
+        self,
+        *,
+        request_id,
+        job_id,
+        workspace_id,
+        source_id,
+        failure_mode=None,
+        allow_fallback=False,
+    ):
+        self._store.start_job(job_id)
+        batch = self._store.create_candidate_batch(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            job_id=job_id,
+            request_id=request_id,
+        )
+        persisted = self._store.add_candidates_to_batch(
+            candidate_batch_id=str(batch["candidate_batch_id"]),
+            workspace_id=workspace_id,
+            source_id=source_id,
+            job_id=job_id,
+            candidates=[
+                {
+                    "candidate_type": "evidence",
+                    "text": "recall status must be explicit after extraction",
+                    "source_span": {"start": 0, "end": 48},
+                    "extractor_name": "test_fake_extractor",
+                }
+            ],
+        )
+        self._store.update_source_processing(
+            source_id=source_id,
+            status="extracted",
+            last_extract_job_id=job_id,
+        )
+        self._store.finish_job_success(
+            job_id=job_id,
+            result_ref={
+                "resource_type": "candidate_batch",
+                "resource_id": str(batch["candidate_batch_id"]),
+            },
+        )
+        return {
+            "status": "succeeded",
+            "candidate_batch_id": str(batch["candidate_batch_id"]),
+            "candidate_count": len(persisted),
+        }
+
+    def _fake_recall(self, **kwargs):
+        return {
+            "status": "skipped",
+            "reason": "evermemos_disabled_for_test",
+            "requested_method": kwargs["requested_method"],
+            "applied_method": "hybrid",
+            "total": 0,
+            "items": [],
+            "trace_refs": {"request_id": kwargs.get("request_id")},
+        }
+
+    monkeypatch.setattr(ExtractionWorker, "run", _fake_extract_run)
+    monkeypatch.setattr(EverMemOSRecallService, "recall", _fake_recall)
+    client = _build_test_client()
+    imported = client.post(
+        "/api/v1/research/sources/import",
+        json={
+            "workspace_id": "ws_task2_extract",
+            "source_type": "paper",
+            "title": "Task2 extract source",
+            "content": "Claim: recall status must be explicit after extraction.",
+        },
+        headers={"x-request-id": "req_task2_extract_import"},
+    )
+    assert imported.status_code == 200
+    source_id = imported.json()["source_id"]
+
+    started = client.post(
+        f"/api/v1/research/sources/{source_id}/extract",
+        json={"workspace_id": "ws_task2_extract", "async_mode": True},
+        headers={
+            "x-request-id": "req_task2_extract",
+            "x-research-llm-failure-mode": "invalid_json",
+            "x-research-llm-allow-fallback": "1",
+        },
+    )
+    assert started.status_code == 202
+    job = wait_for_job_terminal(client, job_id=started.json()["job_id"])
+    assert job["status"] == "succeeded"
+
+    stored = STORE.list_source_memory_recall_results(
+        workspace_id="ws_task2_extract",
+        source_id=source_id,
+    )
+    assert stored[0]["status"] == "skipped"
+    assert stored[0]["reason"] == "evermemos_disabled_for_test"
+
+    detail = client.get(f"/api/v1/research/sources/{source_id}")
+    assert detail.status_code == 200
+    assert detail.json()["memory_recall"]["status"] == "skipped"

@@ -60,6 +60,7 @@ from research_layer.services.raw_material_bootstrap_service import (
     RawMaterialBootstrapService,
 )
 from research_layer.services.source_import_service import SourceImportError, SourceImportService
+from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
 from research_layer.services.candidate_confirmation_service import (
     CandidateConfirmationError,
     CandidateConfirmationService,
@@ -80,6 +81,7 @@ class ResearchSourceController(BaseController):
         self._confirmation_service = CandidateConfirmationService(STORE)
         self._scholarly_source_service = ScholarlySourceService(STORE)
         self._bootstrap_service = RawMaterialBootstrapService(STORE)
+        self._source_memory_recall_service = SourceMemoryRecallService(STORE)
 
     @post(
         "/sources/import",
@@ -238,7 +240,7 @@ class ResearchSourceController(BaseController):
         allow_fallback: bool,
     ) -> None:
         try:
-            await self._extraction_worker.run(
+            result = await self._extraction_worker.run(
                 request_id=request_id,
                 job_id=job_id,
                 workspace_id=workspace_id,
@@ -246,6 +248,34 @@ class ResearchSourceController(BaseController):
                 failure_mode=failure_mode,
                 allow_fallback=allow_fallback,
             )
+            if result.get("status") == "succeeded":
+                source = STORE.get_source(source_id)
+                if source is not None:
+                    candidates = STORE.list_candidates(
+                        workspace_id=workspace_id,
+                        source_id=source_id,
+                        candidate_type=None,
+                        status=None,
+                    )
+                    candidate_text = " ".join(
+                        str(candidate.get("text") or "")
+                        for candidate in candidates[:8]
+                    ).strip()
+                    query_text = candidate_text or str(
+                        source.get("normalized_content") or source.get("content") or ""
+                    )
+                    self._source_memory_recall_service.recall_for_source(
+                        workspace_id=workspace_id,
+                        source_id=source_id,
+                        query_text=query_text,
+                        request_id=request_id,
+                        trace_refs={
+                            "context_type": "source_extract",
+                            "job_id": job_id,
+                            "candidate_batch_id": result.get("candidate_batch_id"),
+                            "candidate_count": len(candidates),
+                        },
+                    )
         except Exception as exc:  # pragma: no cover - defensive fallback
             error = {
                 "error_code": "research.extract_failure",

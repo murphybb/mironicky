@@ -21,6 +21,7 @@ from prometheus_client import Counter, Histogram
 from core.observation.logger import get_logger
 from core.observation.metrics.registry import get_metrics_registry
 from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
 
 _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
@@ -202,6 +203,7 @@ class StructuredPdfDocument:
 class SourceImportService:
     def __init__(self, store: ResearchApiStateStore) -> None:
         self._store = store
+        self._source_memory_recall_service = SourceMemoryRecallService(store)
 
     def import_source(
         self,
@@ -350,6 +352,14 @@ class SourceImportService:
                     "source_input_mode": resolved.source_input_mode,
                 },
             )
+            self._source_memory_recall_service.recall_for_source(
+                workspace_id=workspace_id,
+                source_id=str(source["source_id"]),
+                query_text=str(source.get("normalized_content") or source["content"]),
+                request_id=request_id,
+                trace_refs={"source_input_mode": resolved.source_input_mode},
+            )
+            source = self._store.get_source(str(source["source_id"])) or source
         except SourceImportError as exc:
             if source_id is not None:
                 self._store.emit_event(

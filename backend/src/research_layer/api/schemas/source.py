@@ -54,6 +54,7 @@ class SourceResponse(BaseModel):
     last_extract_status: str | None = None
     last_extract_error: dict[str, object] | None = None
     source_hash: dict[str, object] | None = None
+    memory_recall: dict[str, object] | None = None
     created_at: datetime
     updated_at: datetime
 
