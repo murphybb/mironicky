@@ -1837,8 +1837,10 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
                 )}
                 {Number(extractionContext.partialFailureCount || 0) > 0 && (
                   <div className="cand-desc" style={{ marginTop: '8px' }}>
-                    {isFailedExtractionStatus(extractionContext.status)
+                    {isFailedExtractionStatus(extractionContext.status) && scopedCandidates.length === 0
                       ? `本次抽取有 ${extractionContext.partialFailureCount} 个分支失败，未生成可用候选，请检查上方失败原因后重试。`
+                      : isFailedExtractionStatus(extractionContext.status)
+                      ? `本次抽取有 ${extractionContext.partialFailureCount} 个分支失败，当前候选可能不完整，请结合上方错误复核后再决定是否使用。`
                       : `本次抽取有 ${extractionContext.partialFailureCount} 个分支失败，但系统已保留当前可用候选，请重点复核。`}
                   </div>
                 )}
