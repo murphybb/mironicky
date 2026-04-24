@@ -481,6 +481,65 @@ async def test_slice7_summarizer_returns_structured_llm_summary(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_slice7_summarizer_default_llm_timeout_is_five_minutes(monkeypatch) -> None:
+    monkeypatch.delenv("RESEARCH_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS", raising=False)
+    summarizer = RouteSummarizer()
+    calls: list[dict[str, object]] = []
+
+    class _FakeGateway:
+        async def invoke_json(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(kwargs)
+            return SimpleNamespace(
+                provider_backend="openai_compatible",
+                provider_model="gpt-4.1-mini",
+                request_id="req_slice7_timeout",
+                llm_response_id="resp_slice7_timeout",
+                usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+                raw_text="{}",
+                parsed_json={
+                    "summary": "summary text",
+                    "key_strengths": [{"text": "strength", "node_refs": ["node_conclusion"]}],
+                    "key_risks": [],
+                    "open_questions": [],
+                },
+                fallback_used=False,
+                degraded=False,
+                degraded_reason=None,
+            )
+
+    monkeypatch.setattr(summarizer, "_gateway", _FakeGateway())
+
+    summary, _trace = await summarizer.summarize(
+        candidate={
+            "conclusion_node_id": "node_conclusion",
+            "route_node_ids": ["node_conclusion"],
+            "key_support_node_ids": ["node_conclusion"],
+            "key_assumption_node_ids": [],
+            "risk_node_ids": [],
+            "next_validation_action": "validate",
+            "trace_refs": {"version_id": "ver_1", "route_edge_ids": []},
+        },
+        node_map={
+            "node_conclusion": {
+                "node_id": "node_conclusion",
+                "node_type": "evidence",
+                "object_ref_type": "evidence",
+                "object_ref_id": "evi_1",
+                "short_label": "Conclusion evidence",
+                "status": "active",
+            }
+        },
+        top_factors=[],
+        request_id="req_slice7_timeout",
+        allow_fallback=False,
+    )
+
+    assert summary["summary_generation_mode"] == "llm"
+    assert calls
+    assert calls[0]["timeout_s"] == 300.0
+
+
+@pytest.mark.asyncio
 async def test_slice7_summarizer_fallback_is_explicit(monkeypatch) -> None:
     summarizer = RouteSummarizer()
 

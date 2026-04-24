@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 
 _PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
+_DEFAULT_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS = 300
 
 
 def _load_prompt_template(file_name: str) -> str:
@@ -167,6 +168,7 @@ class RouteSummarizer:
             expected_container="dict",
             backend=backend,
             model=model,
+            timeout_s=self._resolve_llm_timeout_seconds(),
             failure_mode=failure_mode,
         )
         parsed = llm_result.parsed_json
@@ -324,6 +326,20 @@ class RouteSummarizer:
 
         backend, _ = resolve_research_backend_and_model()
         return backend or "unknown"
+
+    def _resolve_llm_timeout_seconds(self) -> float:
+        import os
+
+        raw_value = os.getenv("RESEARCH_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS", "").strip()
+        if not raw_value:
+            return float(_DEFAULT_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS)
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            return float(_DEFAULT_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS)
+        if parsed <= 0:
+            return float(_DEFAULT_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS)
+        return float(parsed)
 
     def _compact_label(self, raw: str, *, max_len: int = 40) -> str:
         collapsed = " ".join(str(raw or "").split())
