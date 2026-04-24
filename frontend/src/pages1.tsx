@@ -10,10 +10,16 @@ import {
   getAsyncJobUiState,
   hydrateConfirmedCandidatesToGraph,
   getRoute,
+  listClaimConflicts,
+  queryGraphRAG,
+  getCrossDocumentReport,
   listSources,
   pollJob,
   getErrorMessage,
   type MemoryRecallResponse,
+  type ClaimConflictRecord,
+  type GraphRAGResponse,
+  type CrossDocumentReportResponse,
 } from './api';
 import { getCandidateBulkConfirmDialogCopy } from './candidate-bulk-actions-helpers';
 
@@ -153,6 +159,37 @@ function relationTagLabel(tag?: string) {
     upstream_inspiration: '上游启发',
   };
   return map[key] || '未标注';
+}
+
+function challengeStatusLabel(status?: string) {
+  const key = String(status || 'clean').toLowerCase();
+  const map: Record<string, string> = {
+    clean: '未被挑战',
+    needs_review: '需要复核',
+    weakened: '已削弱',
+    challenged: '存在挑战',
+  };
+  return map[key] || status || '未被挑战';
+}
+
+function challengeStatusTone(status?: string) {
+  const key = String(status || 'clean').toLowerCase();
+  if (key === 'clean') return { background: 'var(--green-bg)', color: 'var(--green)', borderColor: 'var(--green-border)' };
+  if (key === 'needs_review') return { background: 'var(--amber-bg)', color: 'var(--amber)', borderColor: 'var(--amber-border)' };
+  return { background: 'var(--red-bg)', color: 'var(--red)', borderColor: 'var(--red-border)' };
+}
+
+function compactJson(value: unknown) {
+  if (!value || typeof value !== 'object') return '无';
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function claimConflictText(conflict: ClaimConflictRecord, key: 'new_text' | 'existing_text') {
+  return String(conflict?.evidence?.[key] || '').trim() || '后端未返回文本';
 }
 
 function memoryTypeLabel(type?: string) {
@@ -427,6 +464,7 @@ export function RoutesPage({
                 </div>
                 <div className="rc-foot">
                   <span className={`rbadge ${String(tag).toLowerCase().includes('direct') ? 'direct' : 'recombo'}`}>{relationTagLabel(tag)}</span>
+                  <span className="status-pill" style={challengeStatusTone(rt.challenge_status)}>{challengeStatusLabel(rt.challenge_status)}</span>
                   {rt.stale && <span className="stale-tag">需更新</span>}
                 </div>
               </div>
@@ -445,6 +483,14 @@ export function RoutesPage({
         </div>
         <div className="prev-body">
           <div className="prev-title">{normalizeRouteTitle(r.title)}</div>
+          <div className="hero-meta" style={{ margin: '8px 0 0' }}>
+            <span className="status-pill" style={challengeStatusTone(r.challenge_status)}>{challengeStatusLabel(r.challenge_status)}</span>
+            {r.challenge_refs?.conflict_count > 0 && (
+              <span style={{ fontSize: '11px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                {r.challenge_refs.conflict_count} 个冲突引用
+              </span>
+            )}
+          </div>
           <div className="score-row">
             <div className={`big-score lv-${r.confidence_grade === 'high' ? 'h' : r.confidence_grade === 'medium' ? 'm' : 'l'}`}>{r.confidence_score}</div>
             <div className="pf-list">
@@ -513,6 +559,13 @@ export function RouteDetailPage({
   const r = routes[selRoute];
   const [routeDetail, setRouteDetail] = useState<any>(null);
   const [routeDetailStatus, setRouteDetailStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [claimConflicts, setClaimConflicts] = useState<ClaimConflictRecord[]>([]);
+  const [claimConflictsStatus, setClaimConflictsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [crossDocReport, setCrossDocReport] = useState<CrossDocumentReportResponse | null>(null);
+  const [crossDocReportStatus, setCrossDocReportStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [graphQuestion, setGraphQuestion] = useState('');
+  const [graphAnswer, setGraphAnswer] = useState<GraphRAGResponse | null>(null);
+  const [graphAnswerStatus, setGraphAnswerStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   if (!r) {
     const evidenceCount = Number(nodeTypeStats?.evidence || nodeTypeStats?.e || 0);
     const assumptionCount = Number(nodeTypeStats?.assumption || nodeTypeStats?.a || 0);
@@ -567,6 +620,47 @@ export function RouteDetailPage({
   }, [r?.route_id, workspaceId, showToast]);
   const lvClass = r.confidence_grade === 'high' ? 'h' : r.confidence_grade === 'medium' ? 'm' : 'l';
   const detailRoute = routeDetail || r;
+  useEffect(() => {
+    let cancelled = false;
+    if (!workspaceId) {
+      setClaimConflicts([]);
+      setClaimConflictsStatus('idle');
+      setCrossDocReport(null);
+      setCrossDocReportStatus('idle');
+      return;
+    }
+    setClaimConflictsStatus('loading');
+    listClaimConflicts(workspaceId)
+      .then((result) => {
+        if (cancelled) return;
+        setClaimConflicts(result.items);
+        setClaimConflictsStatus('ready');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setClaimConflicts([]);
+        setClaimConflictsStatus('error');
+        showToast?.(getErrorMessage(error));
+      });
+
+    setCrossDocReportStatus('loading');
+    getCrossDocumentReport(workspaceId)
+      .then((result) => {
+        if (cancelled) return;
+        setCrossDocReport(result);
+        setCrossDocReportStatus('ready');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCrossDocReport(null);
+        setCrossDocReportStatus('error');
+        showToast?.(getErrorMessage(error));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, showToast]);
 
   const routeHypotheses = useMemo(() => {
     if (!Array.isArray(hypotheses)) return [];
@@ -613,6 +707,27 @@ export function RouteDetailPage({
   const riskText = normalizeRiskText(detailRoute.risks?.[0]);
   const assumptionCount = detailRoute.assumptions?.length || 0;
   const riskCount = detailRoute.risks?.length || 0;
+  const reportSummary = crossDocReport?.summary;
+  const reportSections = crossDocReport?.sections;
+
+  const handleGraphRAGSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const question = graphQuestion.trim();
+    if (!question) {
+      showToast?.('请输入 GraphRAG 问题');
+      return;
+    }
+    setGraphAnswerStatus('loading');
+    setGraphAnswer(null);
+    try {
+      const result = await queryGraphRAG(workspaceId, question);
+      setGraphAnswer(result);
+      setGraphAnswerStatus('ready');
+    } catch (error) {
+      setGraphAnswerStatus('error');
+      showToast?.(getErrorMessage(error));
+    }
+  };
 
   return (
     <div className="detail-layout">
@@ -624,6 +739,7 @@ export function RouteDetailPage({
             <span className={`hero-score lv-${lvClass}`}>{detailRoute.confidence_score}</span>
             <span style={{ fontSize: '11px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>置信度</span>
             <span className={`status-pill ${detailRoute.status === 'active' ? 'sp-active' : 'sp-stale'}`}>{detailRoute.status === 'active' ? '进行中' : '需更新'}</span>
+            <span className="status-pill" style={challengeStatusTone(detailRoute.challenge_status)}>{challengeStatusLabel(detailRoute.challenge_status)}</span>
             {detailRoute.relation_tags?.[0] && <span className="status-pill" style={{ background: 'var(--blue-bg)', color: 'var(--blue)', borderColor: 'var(--blue-border)' }}>{relationTagLabel(detailRoute.relation_tags[0])}</span>}
           </div>
         </div>
@@ -672,6 +788,32 @@ export function RouteDetailPage({
         </div>
 
         <div className="section">
+          <div className="sec-title">Conflict Review</div>
+          {claimConflictsStatus === 'loading' ? (
+            <div className="text-muted">正在读取 claim 冲突...</div>
+          ) : claimConflictsStatus === 'error' ? (
+            <div className="text-muted" style={{ color: 'var(--red)' }}>读取 claim 冲突失败。</div>
+          ) : claimConflicts.length === 0 ? (
+            <div className="text-muted">当前工作区没有待展示的 claim 冲突记录。</div>
+          ) : (
+            claimConflicts.slice(0, 6).map((conflict) => (
+              <div className="conflict-card" key={conflict.conflict_id}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--red)', fontWeight: 600 }}>{conflict.conflict_type}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{conflict.status}</div>
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.5 }}>
+                  <strong>new_text：</strong>{claimConflictText(conflict, 'new_text')}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.5, marginTop: '4px' }}>
+                  <strong>existing_text：</strong>{claimConflictText(conflict, 'existing_text')}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="section">
           <div className="sec-title">下一步验证动作</div>
           <div className="nv-box">
             <div className="nv-lbl">验证目标</div>
@@ -716,6 +858,69 @@ export function RouteDetailPage({
               <div style={{ fontSize: '12px', color: 'var(--red)', lineHeight: 1.6 }}>读取路线相关记忆失败，请稍后重试。</div>
             ) : (
               renderMemoryRecallSection(detailRoute.memory_recall)
+            )}
+          </div>
+
+          <div className="side-hdr" style={{ margin: '16px -16px 0', padding: '12px 16px 10px' }}>GraphRAG 查询</div>
+          <form onSubmit={handleGraphRAGSubmit} style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
+            <textarea
+              className="form-input"
+              rows={3}
+              value={graphQuestion}
+              onChange={(event) => setGraphQuestion(event.target.value)}
+              placeholder="输入一个需要 claim 依据回答的问题"
+            />
+            <button className="btn btn-p" disabled={graphAnswerStatus === 'loading'} type="submit">
+              {graphAnswerStatus === 'loading' ? '查询中...' : '查询 GraphRAG'}
+            </button>
+          </form>
+          {graphAnswerStatus === 'error' && (
+            <div style={{ fontSize: '12px', color: 'var(--red)', lineHeight: 1.6, marginTop: '8px' }}>GraphRAG 查询失败。</div>
+          )}
+          {graphAnswerStatus === 'ready' && graphAnswer && (
+            <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
+              <div style={{ fontSize: '12px', color: 'var(--text)', lineHeight: 1.6 }}>{graphAnswer.answer || '后端未返回回答。'}</div>
+              {graphAnswer.citations.length === 0 ? (
+                <div style={{ fontSize: '12px', color: 'var(--amber)', lineHeight: 1.6 }}>没有足够 claim 依据。</div>
+              ) : (
+                graphAnswer.citations.slice(0, 4).map((citation) => (
+                  <div key={`${citation.claim_id}-${citation.score}`} style={{ border: '1px solid var(--border)', borderRadius: '10px', padding: '10px', background: 'var(--bg2)' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.5 }}>{citation.text}</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '6px', lineHeight: 1.5 }}>
+                      claim_id={citation.claim_id} · score={Math.round((citation.score || 0) * 100)}%
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px', lineHeight: 1.5, wordBreak: 'break-word' }}>
+                      source_ref：{compactJson(citation.source_ref)}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          <div className="side-hdr" style={{ margin: '16px -16px 0', padding: '12px 16px 10px' }}>跨文档报告</div>
+          <div style={{ marginTop: '12px', display: 'grid', gap: '8px' }}>
+            {crossDocReportStatus === 'loading' ? (
+              <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>正在读取跨文档报告...</div>
+            ) : crossDocReportStatus === 'error' ? (
+              <div style={{ fontSize: '12px', color: 'var(--red)', lineHeight: 1.6 }}>读取跨文档报告失败。</div>
+            ) : !crossDocReport || !reportSummary ? (
+              <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>当前没有跨文档报告数据。</div>
+            ) : (
+              <>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  claims {reportSummary.claim_count} · conflicts {reportSummary.conflict_count} · routes {reportSummary.route_count} · historical_recall {reportSummary.source_recall_count}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  冲突：{reportSections?.conflicts?.slice(0, 2).map((item) => `${item.conflict_type}/${item.status}`).join('；') || '无'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  路线：{reportSections?.routes?.slice(0, 2).map((item) => normalizeRouteTitle(item.title)).join('；') || '无'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  历史召回：{reportSections?.historical_recall?.slice(0, 2).map((item) => `${item.status} ${item.item_total}/${item.total}`).join('；') || '无'}
+                </div>
+              </>
             )}
           </div>
         </div>

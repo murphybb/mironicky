@@ -76,7 +76,100 @@ export interface RouteRecord {
   route_edge_ids?: string[];
   degraded?: boolean;
   stale?: boolean;
+  claim_ids?: string[];
+  challenge_status?: 'clean' | 'needs_review' | 'weakened' | 'challenged' | string;
+  challenge_refs?: {
+    conflict_count: number;
+    conflict_ids: string[];
+  };
   memory_recall?: MemoryRecallResponse | null;
+}
+
+export interface ClaimConflictRecord {
+  conflict_id: string;
+  workspace_id: string;
+  new_claim_id: string;
+  existing_claim_id: string;
+  conflict_type: string;
+  status: string;
+  evidence: {
+    new_text?: string;
+    existing_text?: string;
+    [key: string]: unknown;
+  };
+  source_ref: Record<string, unknown>;
+  decision_note?: string | null;
+  created_request_id?: string | null;
+  resolved_request_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GraphRAGCitation {
+  claim_id: string;
+  text: string;
+  source_ref: Record<string, unknown>;
+  score: number;
+  graph_refs?: Record<string, unknown>;
+  source_artifact_refs?: Record<string, unknown>[];
+  retrieval_result_id?: string | null;
+  view_type?: string | null;
+  formal_refs?: Record<string, string>[];
+  trace_refs?: Record<string, unknown>;
+}
+
+export interface GraphRAGResponse {
+  workspace_id: string;
+  question: string;
+  answer: string;
+  citations: GraphRAGCitation[];
+  memory_recall: MemoryRecallResponse;
+  trace_refs: Record<string, unknown>;
+}
+
+export interface CrossDocumentReportResponse {
+  workspace_id: string;
+  summary: {
+    claim_count: number;
+    conflict_count: number;
+    source_recall_count: number;
+    route_count: number;
+    challenged_route_count: number;
+    unresolved_gap_count: number;
+    section_limits?: Record<string, number>;
+  };
+  sections: {
+    conflicts: ClaimConflictRecord[];
+    historical_recall: Array<{
+      recall_id: string;
+      source_id: string;
+      status: string;
+      query_text: string;
+      total: number;
+      item_total: number;
+      reason?: string | null;
+    }>;
+    routes: Array<{
+      route_id: string;
+      title: string;
+      summary: string;
+      status: string;
+      conclusion?: string;
+      claim_ids?: string[];
+    }>;
+    challenged_routes: Array<{
+      route_id: string;
+      title: string;
+      summary: string;
+      status: string;
+      challenge_status: string;
+      challenge_refs?: {
+        conflict_count: number;
+        conflict_ids?: { items?: string[]; total?: number; truncated?: boolean } | string[];
+      };
+    }>;
+  };
+  trace_refs?: Record<string, unknown>;
 }
 
 export interface GraphNode {
@@ -355,6 +448,14 @@ function normalizeRouteRecord(route: any): RouteRecord {
     route_edge_ids: Array.isArray(route?.route_edge_ids) ? route.route_edge_ids.map(String) : [],
     degraded: Boolean(route?.degraded),
     stale: Boolean(route?.stale),
+    claim_ids: Array.isArray(route?.claim_ids) ? route.claim_ids.map(String) : [],
+    challenge_status: String(route?.challenge_status ?? 'clean'),
+    challenge_refs: {
+      conflict_count: Number(route?.challenge_refs?.conflict_count ?? 0),
+      conflict_ids: Array.isArray(route?.challenge_refs?.conflict_ids)
+        ? route.challenge_refs.conflict_ids.map(String)
+        : [],
+    },
     memory_recall: normalizeMemoryRecall(route?.memory_recall),
   };
 }
@@ -787,6 +888,26 @@ export async function getGraphDeepChains(workspaceId: string, nodeId: string, ma
 
 export async function getGraphReport(workspaceId: string) {
   return request<any>(`/api/v1/research/graph/${encodeURIComponent(workspaceId)}/report`);
+}
+
+export async function listClaimConflicts(workspaceId: string): Promise<ListResponse<ClaimConflictRecord>> {
+  const data = await request<{ items: ClaimConflictRecord[] }>(`/api/v1/research/conflicts/${encodeURIComponent(workspaceId)}`);
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return { items, total: items.length };
+}
+
+export async function queryGraphRAG(workspaceId: string, question: string): Promise<GraphRAGResponse> {
+  return request<GraphRAGResponse>('/api/v1/research/graphrag/query', {
+    method: 'POST',
+    body: {
+      workspace_id: workspaceId,
+      question,
+    },
+  });
+}
+
+export async function getCrossDocumentReport(workspaceId: string): Promise<CrossDocumentReportResponse> {
+  return request<CrossDocumentReportResponse>(`/api/v1/research/reports/${encodeURIComponent(workspaceId)}/cross-document`);
 }
 
 export async function listVersions(workspaceId?: string) {
