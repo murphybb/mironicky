@@ -9,6 +9,7 @@ from research_layer.api.controllers.research_conflict_controller import (
 )
 from research_layer.api.controllers.research_job_controller import ResearchJobController
 from research_layer.api.controllers.research_source_controller import ResearchSourceController
+from research_layer.services.claim_conflict_service import ClaimConflictService
 from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
 from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
 from research_layer.testing.job_helpers import wait_for_job_terminal
@@ -240,6 +241,48 @@ def test_task3_candidate_confirmation_checks_claims_after_first_50() -> None:
     assert len(items) == 1
     assert items[0]["existing_claim_id"] == old_claim["claim_id"]
     assert items[0]["created_request_id"] == "req_task3_new_after_50_confirm"
+
+
+def test_task3_candidate_confirmation_succeeds_when_conflict_detection_fails(
+    monkeypatch,
+) -> None:
+    def _raise_detection(self, **_kwargs):
+        raise RuntimeError("detector unavailable")
+
+    monkeypatch.setattr(ClaimConflictService, "detect_for_claim", _raise_detection)
+    client = _build_test_client()
+    workspace_id = "ws_task3_confirm_detector_failure"
+    candidate = _create_candidate(
+        workspace_id,
+        "Candidate confirmation should survive detector failure.",
+    )
+
+    response = client.post(
+        "/api/v1/research/candidates/confirm",
+        json={
+            "workspace_id": workspace_id,
+            "candidate_ids": [candidate["candidate_id"]],
+        },
+        headers={"x-request-id": "req_task3_detector_failure"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "confirmed"
+    assert payload["updated_ids"] == [candidate["candidate_id"]]
+    events = STORE.list_events(
+        workspace_id=workspace_id,
+        request_id="req_task3_detector_failure",
+    )
+    failed_events = [
+        event
+        for event in events
+        if event["event_name"] == "claim_conflict_detection_completed"
+        and event["status"] == "failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["refs"]["reason"] == "claim_conflict_detection_exception"
+    assert failed_events[0]["error"]["message"] == "detector unavailable"
 
 
 def test_source_import_succeeds_when_memory_recall_side_effect_raises(

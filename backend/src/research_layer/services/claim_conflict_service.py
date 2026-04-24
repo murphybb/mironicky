@@ -105,14 +105,22 @@ class ClaimConflictService:
         new_claim_id: str,
         candidate_claim_ids: list[str],
         request_id: str,
+        candidate_claims: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         new_claim = self._store.get_claim(new_claim_id)
         if new_claim is None or str(new_claim["workspace_id"]) != workspace_id:
             return {"created_count": 0, "conflict_ids": []}
 
         created_ids: list[str] = []
-        for existing_id in candidate_claim_ids:
-            existing = self._store.get_claim(str(existing_id))
+        existing_claims = candidate_claims
+        if existing_claims is None:
+            existing_claims = []
+            for existing_id in candidate_claim_ids:
+                existing = self._store.get_claim(str(existing_id))
+                if existing is not None:
+                    existing_claims.append(existing)
+
+        for existing in existing_claims:
             if existing is None or existing["claim_id"] == new_claim["claim_id"]:
                 continue
             if str(existing["workspace_id"]) != workspace_id:
@@ -120,6 +128,13 @@ class ClaimConflictService:
             if not self._looks_contradictory(
                 str(new_claim["normalized_text"]),
                 str(existing["normalized_text"]),
+            ):
+                continue
+            if self._has_unresolved_conflict(
+                workspace_id=workspace_id,
+                new_claim_id=str(new_claim["claim_id"]),
+                existing_claim_id=str(existing["claim_id"]),
+                conflict_type="possible_contradiction",
             ):
                 continue
             conflict = self._store.create_claim_conflict(
@@ -152,7 +167,10 @@ class ClaimConflictService:
         if not new_tokens or not existing_tokens:
             return False
         if self._has_antonym_pair(new_tokens, existing_tokens):
-            return self._overlap_without_antonyms(new_tokens, existing_tokens) >= 0.5
+            return (
+                new_negated == existing_negated
+                and self._overlap_without_antonyms(new_tokens, existing_tokens) >= 0.5
+            )
         if new_negated == existing_negated:
             return False
         overlap = len(new_tokens & existing_tokens) / max(
@@ -198,4 +216,22 @@ class ClaimConflictService:
         existing_context = existing_tokens - polarity_tokens
         return len(new_context & existing_context) / max(
             1, min(len(new_context), len(existing_context))
+        )
+
+    def _has_unresolved_conflict(
+        self,
+        *,
+        workspace_id: str,
+        new_claim_id: str,
+        existing_claim_id: str,
+        conflict_type: str,
+    ) -> bool:
+        return any(
+            str(conflict["new_claim_id"]) == new_claim_id
+            and str(conflict["existing_claim_id"]) == existing_claim_id
+            and str(conflict["conflict_type"]) == conflict_type
+            for conflict in self._store.list_claim_conflicts(
+                workspace_id=workspace_id,
+                status="needs_review",
+            )
         )

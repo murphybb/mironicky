@@ -104,6 +104,79 @@ def test_claim_conflict_service_detects_antonym_contradiction(tmp_path) -> None:
     assert result["created_count"] == 1
 
 
+def test_claim_conflict_service_does_not_flag_not_decrease_as_increase_conflict(
+    tmp_path,
+) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(store, "ws_conflict", "Conversion rates increase after launch.")
+    new_claim = _claim(
+        store,
+        "ws_conflict",
+        "Conversion rates did not decrease after launch.",
+    )
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 0
+    assert store.list_claim_conflicts(workspace_id="ws_conflict") == []
+
+
+def test_claim_conflict_service_does_not_flag_not_worsen_as_improve_conflict(
+    tmp_path,
+) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(store, "ws_conflict", "Symptoms improve with treatment.")
+    new_claim = _claim(
+        store,
+        "ws_conflict",
+        "Symptoms do not worsen with treatment.",
+    )
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 0
+    assert store.list_claim_conflicts(workspace_id="ws_conflict") == []
+
+
+def test_claim_conflict_service_does_not_flag_not_contradict_as_support_conflict(
+    tmp_path,
+) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(
+        store,
+        "ws_conflict",
+        "Brand trust supports purchase intention.",
+    )
+    new_claim = _claim(
+        store,
+        "ws_conflict",
+        "Brand trust does not contradict purchase intention.",
+    )
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 0
+    assert store.list_claim_conflicts(workspace_id="ws_conflict") == []
+
+
 def test_claim_conflict_service_does_not_treat_not_only_as_negation(tmp_path) -> None:
     store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
     old_claim = _claim(store, "ws_conflict", "The method is effective and scalable.")

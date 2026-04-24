@@ -546,16 +546,17 @@ class CandidateConfirmationService:
         request_id: str,
     ) -> None:
         try:
-            existing_claim_ids = [
-                str(item["claim_id"])
+            existing_claims = [
+                item
                 for item in self._store.list_claims(workspace_id)
                 if str(item["claim_id"]) != str(claim["claim_id"])
             ]
             result = self._claim_conflict_service.detect_for_claim(
                 workspace_id=workspace_id,
                 new_claim_id=str(claim["claim_id"]),
-                candidate_claim_ids=existing_claim_ids,
+                candidate_claim_ids=[],
                 request_id=request_id,
+                candidate_claims=existing_claims,
             )
             self._store.emit_event(
                 event_name="claim_conflict_detection_completed",
