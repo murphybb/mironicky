@@ -36,6 +36,9 @@ _RECALL_METHODS = {
     "rrf": RetrieveMethod.RRF,
     "agentic": RetrieveMethod.AGENTIC,
 }
+_RECALL_REQUIRED_ENV_VARS = ("MONGODB_HOST", "ES_HOSTS", "MILVUS_HOST")
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on", "enabled"}
+_FALSEY_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
 def _build_research_claim_group_id(workspace_id: str) -> str:
@@ -504,6 +507,19 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 request_id=request_id,
                 context_ref=context_ref,
             )
+        skip_reason = self._recall_skip_reason()
+        if skip_reason is not None:
+            return self.build_skipped_response(
+                requested_method=requested,
+                applied_method=applied_method.value,
+                reason=skip_reason if reason is None else f"{skip_reason}; {reason}",
+                query_text=query,
+                workspace_id=workspace_id,
+                claim_ids=normalized_claim_ids,
+                context_type=context_type,
+                request_id=request_id,
+                context_ref=context_ref,
+            )
 
         group_id = _build_research_claim_group_id(workspace_id)
         self._store.emit_event(
@@ -705,6 +721,27 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
         if resolved is None:
             return RetrieveMethod.HYBRID, "unsupported_recall_method_defaulted_to_hybrid"
         return resolved, None
+
+    def _recall_skip_reason(self) -> str | None:
+        disabled = os.getenv("RESEARCH_EVERMEMOS_RECALL_DISABLED", "").strip().lower()
+        if disabled in _TRUTHY_ENV_VALUES:
+            return "evermemos_recall_disabled"
+
+        enabled = os.getenv("RESEARCH_EVERMEMOS_RECALL_ENABLED")
+        if enabled is not None and enabled.strip().lower() in _FALSEY_ENV_VALUES:
+            return "evermemos_recall_disabled"
+
+        if not self._uses_default_memory_manager():
+            return None
+        if any(not os.getenv(name, "").strip() for name in _RECALL_REQUIRED_ENV_VARS):
+            return "evermemos_recall_unconfigured"
+        return None
+
+    def _uses_default_memory_manager(self) -> bool:
+        return (
+            getattr(self._get_memory_manager, "__func__", None)
+            is _AsyncMemoryRuntimeMixin._get_memory_manager
+        )
 
     def _resolve_query_text(
         self,

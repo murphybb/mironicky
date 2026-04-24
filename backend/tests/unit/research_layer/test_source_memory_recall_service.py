@@ -101,6 +101,63 @@ def test_source_memory_recall_persists_skipped_result(monkeypatch, tmp_path) -> 
     assert loaded["total"] == 0
 
 
+def test_source_memory_recall_persists_skipped_result_when_evermemos_unconfigured(
+    monkeypatch, tmp_path
+) -> None:
+    for name in ("MONGODB_HOST", "ES_HOSTS", "MILVUS_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    store = _build_store(tmp_path)
+    source = _seed_source(store)
+    service = SourceMemoryRecallService(store)
+
+    result = service.recall_for_source(
+        workspace_id="ws_source_recall",
+        source_id=str(source["source_id"]),
+        query_text="brand attitude claim",
+        request_id="req_source_recall_unconfigured",
+    )
+
+    assert result["status"] == "skipped"
+    assert str(result["reason"]).startswith("evermemos_recall_unconfigured")
+    assert result["query_text"] == "brand attitude claim"
+    loaded = store.list_source_memory_recall_results(
+        workspace_id="ws_source_recall",
+        source_id=str(source["source_id"]),
+    )
+    assert loaded[0]["status"] == "skipped"
+    assert str(loaded[0]["reason"]).startswith("evermemos_recall_unconfigured")
+    assert loaded[0]["query_text"] == "brand attitude claim"
+    reloaded_source = store.get_source(str(source["source_id"]))
+    assert reloaded_source is not None
+    assert reloaded_source["memory_recall"]["status"] == "skipped"
+
+
+def test_source_memory_recall_persists_skipped_result_when_evermemos_disabled(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("MONGODB_HOST", "localhost")
+    monkeypatch.setenv("ES_HOSTS", "http://localhost:19200")
+    monkeypatch.setenv("MILVUS_HOST", "localhost")
+    monkeypatch.setenv("RESEARCH_EVERMEMOS_RECALL_DISABLED", "1")
+    store = _build_store(tmp_path)
+    source = _seed_source(store)
+    service = SourceMemoryRecallService(store)
+
+    result = service.recall_for_source(
+        workspace_id="ws_source_recall",
+        source_id=str(source["source_id"]),
+        query_text="brand attitude claim",
+        request_id="req_source_recall_disabled",
+    )
+
+    assert result["status"] == "skipped"
+    assert str(result["reason"]).startswith("evermemos_recall_disabled")
+    loaded = store.get_source_memory_recall_result(str(result["recall_id"]))
+    assert loaded is not None
+    assert loaded["status"] == "skipped"
+    assert str(loaded["reason"]).startswith("evermemos_recall_disabled")
+
+
 def test_source_memory_recall_persists_failed_result_when_recall_raises(tmp_path) -> None:
     store = _build_store(tmp_path)
     source = _seed_source(store)

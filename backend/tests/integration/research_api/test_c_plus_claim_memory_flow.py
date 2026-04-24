@@ -71,6 +71,9 @@ def test_task2_source_import_response_and_store_include_memory_recall(monkeypatc
 
 
 def test_task2_source_extract_persists_explicit_memory_recall(monkeypatch) -> None:
+    for name in ("MONGODB_HOST", "ES_HOSTS", "MILVUS_HOST"):
+        monkeypatch.delenv(name, raising=False)
+
     async def _fake_extract_run(
         self,
         *,
@@ -120,19 +123,7 @@ def test_task2_source_extract_persists_explicit_memory_recall(monkeypatch) -> No
             "candidate_count": len(persisted),
         }
 
-    def _fake_recall(self, **kwargs):
-        return {
-            "status": "skipped",
-            "reason": "evermemos_disabled_for_test",
-            "requested_method": kwargs["requested_method"],
-            "applied_method": "hybrid",
-            "total": 0,
-            "items": [],
-            "trace_refs": {"request_id": kwargs.get("request_id")},
-        }
-
     monkeypatch.setattr(ExtractionWorker, "run", _fake_extract_run)
-    monkeypatch.setattr(EverMemOSRecallService, "recall", _fake_recall)
     client = _build_test_client()
     imported = client.post(
         "/api/v1/research/sources/import",
@@ -165,8 +156,20 @@ def test_task2_source_extract_persists_explicit_memory_recall(monkeypatch) -> No
         source_id=source_id,
     )
     assert stored[0]["status"] == "skipped"
-    assert stored[0]["reason"] == "evermemos_disabled_for_test"
+    assert str(stored[0]["reason"]).startswith("evermemos_recall_unconfigured")
 
     detail = client.get(f"/api/v1/research/sources/{source_id}")
     assert detail.status_code == 200
     assert detail.json()["memory_recall"]["status"] == "skipped"
+    assert detail.json()["memory_recall"]["reason"].startswith(
+        "evermemos_recall_unconfigured"
+    )
+    listed = client.get(
+        "/api/v1/research/sources",
+        params={"workspace_id": "ws_task2_extract"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["memory_recall"]["status"] == "skipped"
+    assert listed.json()["items"][0]["memory_recall"]["reason"].startswith(
+        "evermemos_recall_unconfigured"
+    )
