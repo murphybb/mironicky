@@ -585,6 +585,26 @@ function normalizeMemoryRecall(recall: any): MemoryRecallResponse | null {
   };
 }
 
+function normalizeSourceRecord(source: any): SourceRecord {
+  return {
+    ...source,
+    source_id: String(source?.source_id ?? ''),
+    workspace_id: String(source?.workspace_id ?? ''),
+    source_type: String(source?.source_type ?? ''),
+    title: String(source?.title ?? ''),
+    content: String(source?.content ?? ''),
+    status: String(source?.status ?? ''),
+    metadata: source?.metadata && typeof source.metadata === 'object' ? source.metadata : {},
+    last_extract_job_id: source?.last_extract_job_id == null ? null : String(source.last_extract_job_id),
+    last_candidate_batch_id: source?.last_candidate_batch_id == null ? null : String(source.last_candidate_batch_id),
+    last_extract_status: source?.last_extract_status == null ? null : String(source.last_extract_status),
+    last_extract_error: source?.last_extract_error && typeof source.last_extract_error === 'object' ? source.last_extract_error : null,
+    memory_recall: normalizeMemoryRecall(source?.memory_recall),
+    created_at: source?.created_at == null ? undefined : String(source.created_at),
+    updated_at: source?.updated_at == null ? undefined : String(source.updated_at),
+  };
+}
+
 function normalizeGraph(graph: any): GraphResponse {
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph?.edges) ? graph.edges : [];
@@ -1021,7 +1041,9 @@ export async function listCandidates(workspaceId: string): Promise<ListResponse<
 }
 
 export async function listSources(workspaceId: string): Promise<ListResponse<SourceRecord>> {
-  return request<ListResponse<SourceRecord>>(`/api/v1/research/sources?workspace_id=${encodeURIComponent(workspaceId)}`);
+  const data = await request<ListResponse<any>>(`/api/v1/research/sources?workspace_id=${encodeURIComponent(workspaceId)}`);
+  const items = Array.isArray(data?.items) ? data.items.map(normalizeSourceRecord) : [];
+  return { items, total: Number(data?.total ?? items.length) };
 }
 
 export async function listWorkspaces(): Promise<ListResponse<WorkspaceSummaryRecord>> {
