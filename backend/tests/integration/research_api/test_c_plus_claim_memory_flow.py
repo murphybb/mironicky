@@ -142,6 +142,23 @@ def test_task5_graphrag_query_returns_answer_citations_and_memory_recall(
     assert payload["trace_refs"]["request_id"] == "req_task5_graphrag"
 
 
+def test_task5_graphrag_query_rejects_blank_question() -> None:
+    client = _build_test_client()
+
+    response = client.post(
+        "/api/v1/research/graphrag/query",
+        json={
+            "workspace_id": "ws_task5_blank_question",
+            "question": "   ",
+            "limit": 8,
+        },
+        headers={"x-request-id": "req_task5_blank_question"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "research.invalid_request"
+
+
 def test_task2_source_import_response_and_store_include_memory_recall(monkeypatch) -> None:
     def _fake_recall(self, **kwargs):
         return {

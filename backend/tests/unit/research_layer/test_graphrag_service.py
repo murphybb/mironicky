@@ -173,3 +173,83 @@ def test_graphrag_answer_without_citations_does_not_fabricate_answer(tmp_path) -
     assert result["memory_recall"]["status"] == "skipped"
     assert result["memory_recall"]["reason"] == "no_claim_citations"
     assert recall.calls == []
+
+
+def test_graphrag_dangling_claim_ref_is_dropped_without_answer(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    item = {
+        "result_id": "evidence:dangling",
+        "score": 0.9,
+        "title": "Dangling retrieval",
+        "snippet": "this snippet must not become grounded evidence",
+        "source_ref": {"source_id": "source_dangling"},
+        "supporting_refs": {"claim_id": "claim_missing"},
+        "trace_refs": {"source": "dangling_test"},
+    }
+    retrieval = FakeRetrievalService(item)
+    recall = FakeRecallService()
+    service = GraphRAGService(store, retrieval_service=retrieval, recall_service=recall)
+
+    result = service.answer(
+        workspace_id="ws_graphrag_dangling",
+        question="What evidence exists?",
+        request_id="req_graphrag_dangling",
+        limit=8,
+    )
+
+    assert result["citations"] == []
+    assert "not enough claim evidence" in result["answer"]
+    assert result["memory_recall"]["reason"] == "no_claim_citations"
+    assert result["trace_refs"]["dropped_claim_refs"] == [
+        {
+            "claim_id": "claim_missing",
+            "reason": "claim_not_found",
+            "retrieval_result_id": "evidence:dangling",
+            "view_type": "evidence",
+        }
+    ]
+    assert recall.calls == []
+
+
+def test_graphrag_citation_source_ref_comes_from_each_claim_not_item(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    workspace_id = "ws_graphrag_multi_source"
+    first = _seed_claim(store, workspace_id)
+    second = _seed_claim(store, workspace_id)
+    first_claim_id = str(first["claim"]["claim_id"])
+    second_claim_id = str(second["claim"]["claim_id"])
+    first_source_id = str(first["source"]["source_id"])
+    second_source_id = str(second["source"]["source_id"])
+    item = {
+        "result_id": "aggregate:multi-source",
+        "score": 0.93,
+        "title": "Aggregate retrieval",
+        "snippet": "aggregate item with multiple source claims",
+        "source_ref": {"source_id": "source_aggregate_wrong"},
+        "graph_refs": {
+            "node_ids": [first["node"]["node_id"], second["node"]["node_id"]],
+            "edge_ids": [],
+        },
+        "trace_refs": {"source_ref": {"source_id": "source_aggregate_wrong"}},
+    }
+    retrieval = FakeRetrievalService(item)
+    recall = FakeRecallService()
+    service = GraphRAGService(store, retrieval_service=retrieval, recall_service=recall)
+
+    result = service.answer(
+        workspace_id=workspace_id,
+        question="What increases timeout latency?",
+        request_id="req_graphrag_multi_source",
+        limit=8,
+    )
+
+    source_ref_by_claim = {
+        citation["claim_id"]: citation["source_ref"]
+        for citation in result["citations"]
+    }
+    assert source_ref_by_claim[first_claim_id]["source_id"] == first_source_id
+    assert source_ref_by_claim[second_claim_id]["source_id"] == second_source_id
+    assert all(
+        citation["source_ref"]["source_id"] != "source_aggregate_wrong"
+        for citation in result["citations"]
+    )

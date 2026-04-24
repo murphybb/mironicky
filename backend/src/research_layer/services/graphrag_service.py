@@ -43,10 +43,12 @@ class GraphRAGService:
             request_id=request_id,
             limit=safe_limit,
         )
+        dropped_claim_refs: list[dict[str, object]] = []
         citations = self._build_citations(
             workspace_id=workspace_id,
             items=retrievals["items"],
             limit=safe_limit,
+            dropped_claim_refs=dropped_claim_refs,
         )
         claim_ids = self._claim_ids(citations)
         trace_refs = {
@@ -55,6 +57,8 @@ class GraphRAGService:
             "claim_ids": claim_ids,
             "graph_refs": self._merge_graph_refs(citations),
             "source_artifact_refs": self._source_artifact_refs(citations),
+            "dropped_claim_refs": dropped_claim_refs,
+            "skipped_claim_refs": dropped_claim_refs,
         }
         if not citations:
             return {
@@ -148,6 +152,7 @@ class GraphRAGService:
         workspace_id: str,
         items: list[dict[str, object]],
         limit: int,
+        dropped_claim_refs: list[dict[str, object]],
     ) -> list[dict[str, object]]:
         claim_by_ref = self._claim_id_by_formal_ref(workspace_id)
         citations: list[dict[str, object]] = []
@@ -158,15 +163,31 @@ class GraphRAGService:
                 if claim_id in seen:
                     continue
                 claim = self._store.get_claim(claim_id)
-                text = str((claim or {}).get("text") or item.get("snippet") or "").strip()
+                if claim is None:
+                    dropped_claim_refs.append(
+                        self._dropped_claim_ref(
+                            claim_id=claim_id,
+                            item=item,
+                            reason="claim_not_found",
+                        )
+                    )
+                    continue
+                text = str(claim.get("text") or "").strip()
                 if not text:
+                    dropped_claim_refs.append(
+                        self._dropped_claim_ref(
+                            claim_id=claim_id,
+                            item=item,
+                            reason="claim_text_missing",
+                        )
+                    )
                     continue
                 seen.add(claim_id)
                 citations.append(
                     {
                         "claim_id": claim_id,
                         "text": text,
-                        "source_ref": self._source_ref_for_item(item, claim),
+                        "source_ref": self._source_ref_for_claim(claim),
                         "score": float(item.get("score") or 0.0),
                         "graph_refs": item.get("graph_refs", {}),
                         "source_artifact_refs": self._artifact_refs_for_item(item),
@@ -176,6 +197,7 @@ class GraphRAGService:
                         "trace_refs": {
                             "retrieval_trace_refs": item.get("trace_refs", {}),
                             "evidence_refs": item.get("evidence_refs", []),
+                            "item_source_ref": item.get("source_ref", {}),
                         },
                     }
                 )
@@ -220,22 +242,36 @@ class GraphRAGService:
             claim_ids.append(str(supporting_refs["claim_id"]))
         return self._dedupe(claim_ids)
 
-    def _source_ref_for_item(
+    def _source_ref_for_claim(
         self,
-        item: dict[str, object],
-        claim: dict[str, object] | None,
+        claim: dict[str, object],
     ) -> dict[str, object]:
-        source_ref = item.get("source_ref", {})
-        if isinstance(source_ref, dict) and source_ref:
-            return source_ref
-        source_id = (claim or {}).get("source_id")
+        source_id = claim.get("source_id")
         source = self._store.get_source(str(source_id)) if source_id else None
+        source_ref = {
+            "claim_id": str(claim["claim_id"]),
+            "source_id": str(source_id) if source_id else "",
+            "source_span": claim.get("source_span", {}),
+            "trace_refs": claim.get("trace_refs", {}),
+        }
         if not source:
-            return {"source_id": str(source_id)} if source_id else {}
+            return source_ref
+        source_ref["source_type"] = source.get("source_type")
+        source_ref["title"] = source.get("title")
+        return source_ref
+
+    def _dropped_claim_ref(
+        self,
+        *,
+        claim_id: str,
+        item: dict[str, object],
+        reason: str,
+    ) -> dict[str, object]:
         return {
-            "source_id": str(source["source_id"]),
-            "source_type": source.get("source_type"),
-            "title": source.get("title"),
+            "claim_id": claim_id,
+            "reason": reason,
+            "retrieval_result_id": str(item.get("result_id") or ""),
+            "view_type": str(item.get("_view_type") or ""),
         }
 
     def _artifact_refs_for_item(self, item: dict[str, object]) -> list[dict[str, object]]:
