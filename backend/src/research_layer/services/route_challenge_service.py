@@ -10,6 +10,19 @@ class RouteChallengeService:
     def evaluate_route(
         self, *, workspace_id: str, route: dict[str, object]
     ) -> dict[str, object]:
+        return self.evaluate_route_with_conflicts(
+            workspace_id=workspace_id,
+            route=route,
+            conflicts=self._store.list_claim_conflicts(workspace_id=workspace_id),
+        )
+
+    def evaluate_route_with_conflicts(
+        self,
+        *,
+        workspace_id: str,
+        route: dict[str, object],
+        conflicts: list[dict[str, object]],
+    ) -> dict[str, object]:
         claim_ids = {
             str(claim_id).strip()
             for claim_id in route.get("claim_ids", [])
@@ -23,7 +36,9 @@ class RouteChallengeService:
             }
 
         active_conflicts: list[dict[str, object]] = []
-        for conflict in self._store.list_claim_conflicts(workspace_id=workspace_id):
+        for conflict in conflicts:
+            if str(conflict.get("workspace_id") or "") != workspace_id:
+                continue
             status = str(conflict.get("status") or "")
             if status not in {"needs_review", "accepted"}:
                 continue

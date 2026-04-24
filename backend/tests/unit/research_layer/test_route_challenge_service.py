@@ -98,3 +98,20 @@ def test_route_challenge_service_ignores_rejected_and_resolved_conflicts(tmp_pat
         "conflict_count": 0,
         "conflict_ids": [],
     }
+
+
+def test_route_challenge_service_evaluates_prefetched_conflicts(tmp_path) -> None:
+    store = _store(tmp_path)
+    conflict = _conflict(store, status="needs_review")
+    _conflict(store, new_claim_id="claim_unrelated", status="needs_review")
+    service = RouteChallengeService(store)
+
+    result = service.evaluate_route_with_conflicts(
+        workspace_id="ws_route_challenge",
+        route={"claim_ids": ["claim_route"]},
+        conflicts=store.list_claim_conflicts(workspace_id="ws_route_challenge"),
+    )
+
+    assert result["challenge_status"] == "needs_review"
+    assert result["conflict_count"] == 1
+    assert result["conflict_ids"] == [conflict["conflict_id"]]
