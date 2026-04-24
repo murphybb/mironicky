@@ -201,6 +201,47 @@ def test_task3_candidate_confirmation_creates_claim_conflict() -> None:
     assert items[0]["created_request_id"] == "req_task3_second_confirm"
 
 
+def test_task3_candidate_confirmation_checks_claims_after_first_50() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_task3_confirm_after_50"
+    for index in range(55):
+        filler = _create_candidate(workspace_id, f"Unrelated neutral claim number {index}.")
+        STORE.create_claim_from_candidate(
+            candidate=filler,
+            normalized_text=str(filler["text"]).lower(),
+        )
+    old_candidate = _create_candidate(
+        workspace_id,
+        "Brand trust increases purchase intention.",
+    )
+    old_claim = STORE.create_claim_from_candidate(
+        candidate=old_candidate,
+        normalized_text=str(old_candidate["text"]).lower(),
+    )
+    new_candidate = _create_candidate(
+        workspace_id,
+        "Brand trust does not increase purchase intention.",
+    )
+
+    second = client.post(
+        "/api/v1/research/candidates/confirm",
+        json={
+            "workspace_id": workspace_id,
+            "candidate_ids": [new_candidate["candidate_id"]],
+        },
+        headers={"x-request-id": "req_task3_new_after_50_confirm"},
+    )
+    assert second.status_code == 200
+
+    listed = client.get(f"/api/v1/research/conflicts/{workspace_id}")
+
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert len(items) == 1
+    assert items[0]["existing_claim_id"] == old_claim["claim_id"]
+    assert items[0]["created_request_id"] == "req_task3_new_after_50_confirm"
+
+
 def test_source_import_succeeds_when_memory_recall_side_effect_raises(
     monkeypatch,
 ) -> None:

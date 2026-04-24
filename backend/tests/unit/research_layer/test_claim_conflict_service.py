@@ -86,3 +86,61 @@ def test_claim_conflict_service_skips_cross_workspace_candidates(tmp_path) -> No
 
     assert result["created_count"] == 0
     assert store.list_claim_conflicts(workspace_id="ws_conflict") == []
+
+
+def test_claim_conflict_service_detects_antonym_contradiction(tmp_path) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(store, "ws_conflict", "Conversion rates increase after launch.")
+    new_claim = _claim(store, "ws_conflict", "Conversion rates decrease after launch.")
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 1
+
+
+def test_claim_conflict_service_does_not_treat_not_only_as_negation(tmp_path) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(store, "ws_conflict", "The method is effective and scalable.")
+    new_claim = _claim(
+        store,
+        "ws_conflict",
+        "The method is not only effective but scalable.",
+    )
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 0
+    assert store.list_claim_conflicts(workspace_id="ws_conflict") == []
+
+
+def test_claim_conflict_service_ignores_number_stopword_overlap(tmp_path) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "claim_conflicts.sqlite3"))
+    old_claim = _claim(store, "ws_conflict", "2024 expenses increased 10 percent.")
+    new_claim = _claim(
+        store,
+        "ws_conflict",
+        "2024 revenue did not increase 10 percent.",
+    )
+    service = ClaimConflictService(store)
+
+    result = service.detect_for_claim(
+        workspace_id="ws_conflict",
+        new_claim_id=str(new_claim["claim_id"]),
+        candidate_claim_ids=[str(old_claim["claim_id"])],
+        request_id="req_conflict",
+    )
+
+    assert result["created_count"] == 0
+    assert store.list_claim_conflicts(workspace_id="ws_conflict") == []

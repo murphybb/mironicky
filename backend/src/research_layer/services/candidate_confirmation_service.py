@@ -554,7 +554,7 @@ class CandidateConfirmationService:
             result = self._claim_conflict_service.detect_for_claim(
                 workspace_id=workspace_id,
                 new_claim_id=str(claim["claim_id"]),
-                candidate_claim_ids=existing_claim_ids[:50],
+                candidate_claim_ids=existing_claim_ids,
                 request_id=request_id,
             )
             self._store.emit_event(
