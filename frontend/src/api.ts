@@ -194,20 +194,23 @@ export interface CrossDocumentHistoricalRecallItem {
   request_id?: string | null;
 }
 
-export interface CrossDocumentRouteItem {
+export interface CrossDocumentRouteBaseItem {
   route_id: string;
   title: string;
   summary: string;
   status: string;
-  conclusion: string;
   claim_ids: string[];
   route_node_ids: IdSample;
   route_edge_ids: IdSample;
+}
+
+export interface CrossDocumentRouteItem extends CrossDocumentRouteBaseItem {
+  conclusion: string;
   version_id?: string | null;
   request_id?: string | null;
 }
 
-export interface CrossDocumentChallengedRouteItem extends CrossDocumentRouteItem {
+export interface CrossDocumentChallengedRouteItem extends CrossDocumentRouteBaseItem {
   challenge_status: string;
   challenge_refs: {
     conflict_count: number;
