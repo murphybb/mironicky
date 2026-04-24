@@ -3,6 +3,17 @@ from __future__ import annotations
 from research_layer.api.controllers._state_store import ResearchApiStateStore
 from research_layer.services.route_challenge_service import RouteChallengeService
 
+SECTION_LIMITS = {
+    "claims": 50,
+    "conflicts": 50,
+    "historical_recall": 20,
+    "routes": 50,
+    "challenged_routes": 50,
+    "unresolved_gaps": 50,
+}
+ITEM_SAMPLE_LIMIT = 3
+ID_SAMPLE_LIMIT = 5
+
 
 class CrossDocumentReportService:
     def __init__(self, store: ResearchApiStateStore) -> None:
@@ -26,6 +37,11 @@ class CrossDocumentReportService:
             conflicts=conflicts,
             node_map=node_map,
         )
+        unresolved_gaps = self._unresolved_gaps(
+            conflicts=conflicts,
+            recalls=recalls,
+            challenged_routes=challenged_routes,
+        )
 
         return {
             "workspace_id": workspace_id,
@@ -34,35 +50,51 @@ class CrossDocumentReportService:
                 "conflict_count": len(conflicts),
                 "source_recall_count": len(recalls),
                 "route_count": len(routes),
+                "challenged_route_count": len(challenged_routes),
+                "unresolved_gap_count": len(unresolved_gaps),
+                "section_limits": SECTION_LIMITS,
             },
             "sections": {
-                "claims": [self._claim_ref(claim) for claim in claims],
-                "conflicts": [self._conflict_ref(conflict) for conflict in conflicts],
-                "historical_recall": [
-                    self._source_recall_ref(recall) for recall in recalls
+                "claims": [
+                    self._claim_ref(claim)
+                    for claim in self._limit_section("claims", claims)
                 ],
-                "unresolved_gaps": self._unresolved_gaps(
-                    conflicts=conflicts,
-                    recalls=recalls,
-                    challenged_routes=challenged_routes,
+                "conflicts": [
+                    self._conflict_ref(conflict)
+                    for conflict in self._limit_section("conflicts", conflicts)
+                ],
+                "historical_recall": [
+                    self._source_recall_ref(recall)
+                    for recall in self._limit_section("historical_recall", recalls)
+                ],
+                "unresolved_gaps": self._limit_section(
+                    "unresolved_gaps", unresolved_gaps
                 ),
                 "routes": [
-                    self._route_ref(route, node_map=node_map) for route in routes
+                    self._route_ref(route, node_map=node_map)
+                    for route in self._limit_section("routes", routes)
                 ],
-                "challenged_routes": challenged_routes,
+                "challenged_routes": self._limit_section(
+                    "challenged_routes", challenged_routes
+                ),
             },
             "trace_refs": {
                 "request_id": request_id,
-                "claim_ids": [str(claim["claim_id"]) for claim in claims],
-                "conflict_ids": [
-                    str(conflict["conflict_id"]) for conflict in conflicts
-                ],
-                "source_recall_ids": [
-                    str(recall["recall_id"]) for recall in recalls
-                ],
-                "route_ids": [str(route["route_id"]) for route in routes],
+                "claim_ids": self._id_sample(claim["claim_id"] for claim in claims),
+                "conflict_ids": self._id_sample(
+                    conflict["conflict_id"] for conflict in conflicts
+                ),
+                "source_recall_ids": self._id_sample(
+                    recall["recall_id"] for recall in recalls
+                ),
+                "route_ids": self._id_sample(route["route_id"] for route in routes),
             },
         }
+
+    def _limit_section(
+        self, section_name: str, items: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        return items[: SECTION_LIMITS[section_name]]
 
     def _claim_ref(self, claim: dict[str, object]) -> dict[str, object]:
         return {
@@ -74,8 +106,8 @@ class CrossDocumentReportService:
             "text": str(claim["text"]),
             "status": str(claim["status"]),
             "source_span": claim.get("source_span", {}),
-            "trace_refs": claim.get("trace_refs", {}),
-            "memory_link": claim.get("memory_link"),
+            "trace_refs": self._compact_mapping(claim.get("trace_refs")),
+            "memory_link": self._compact_mapping(claim.get("memory_link")),
         }
 
     def _conflict_ref(self, conflict: dict[str, object]) -> dict[str, object]:
@@ -102,10 +134,27 @@ class CrossDocumentReportService:
             "applied_method": recall.get("applied_method"),
             "query_text": str(recall.get("query_text") or ""),
             "total": int(recall.get("total") or 0),
-            "items": recall.get("items", []),
-            "trace_refs": recall.get("trace_refs", {}),
+            "item_total": len(self._as_dict_list(recall.get("items"))),
+            "items": [
+                self._source_recall_item_ref(item)
+                for item in self._as_dict_list(recall.get("items"))[:ITEM_SAMPLE_LIMIT]
+            ],
+            "items_truncated": len(self._as_dict_list(recall.get("items")))
+            > ITEM_SAMPLE_LIMIT,
+            "trace_refs": self._compact_mapping(recall.get("trace_refs")),
             "error": recall.get("error"),
             "request_id": recall.get("request_id"),
+        }
+
+    def _source_recall_item_ref(self, item: dict[str, object]) -> dict[str, object]:
+        return {
+            "memory_type": item.get("memory_type"),
+            "memory_id": item.get("memory_id"),
+            "score": item.get("score"),
+            "title": item.get("title"),
+            "snippet": item.get("snippet"),
+            "source_ref": item.get("source_ref", {}),
+            "linked_claim_refs": self._limit_claim_refs(item.get("linked_claim_refs")),
         }
 
     def _route_ref(
@@ -121,8 +170,8 @@ class CrossDocumentReportService:
             "status": str(route["status"]),
             "conclusion": str(route.get("conclusion") or ""),
             "claim_ids": self._route_claim_ids(route=route, node_map=node_map),
-            "route_node_ids": route.get("route_node_ids", []),
-            "route_edge_ids": route.get("route_edge_ids", []),
+            "route_node_ids": self._id_sample(route.get("route_node_ids", [])),
+            "route_edge_ids": self._id_sample(route.get("route_edge_ids", [])),
             "version_id": route.get("version_id"),
             "request_id": route.get("request_id"),
         }
@@ -157,7 +206,7 @@ class CrossDocumentReportService:
                     "challenge_status": challenge["challenge_status"],
                     "challenge_refs": {
                         "conflict_count": challenge["conflict_count"],
-                        "conflict_ids": challenge["conflict_ids"],
+                        "conflict_ids": self._id_sample(challenge["conflict_ids"]),
                     },
                 }
             )
@@ -226,3 +275,36 @@ class CrossDocumentReportService:
                 }
             )
         return gaps
+
+    def _id_sample(self, values: object) -> dict[str, object]:
+        items = [str(value) for value in values] if values is not None else []
+        return {
+            "total": len(items),
+            "items": items[:ID_SAMPLE_LIMIT],
+            "truncated": len(items) > ID_SAMPLE_LIMIT,
+        }
+
+    def _compact_mapping(self, value: object) -> dict[str, object]:
+        if not isinstance(value, dict):
+            return {}
+        compacted: dict[str, object] = {}
+        for key, item in value.items():
+            if isinstance(item, list):
+                compacted[str(key)] = self._id_sample(item)
+            elif isinstance(item, dict):
+                compacted[str(key)] = {
+                    "keys": list(item.keys())[:ID_SAMPLE_LIMIT],
+                    "total_keys": len(item),
+                    "truncated": len(item) > ID_SAMPLE_LIMIT,
+                }
+            else:
+                compacted[str(key)] = item
+        return compacted
+
+    def _as_dict_list(self, value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def _limit_claim_refs(self, value: object) -> list[dict[str, object]]:
+        return self._as_dict_list(value)[:ITEM_SAMPLE_LIMIT]

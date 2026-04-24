@@ -355,6 +355,31 @@ def test_task6_cross_document_report_endpoint_returns_summary_and_sections() -> 
         error=None,
         request_id="req_task6_recall",
     )
+    node = STORE.create_graph_node(
+        workspace_id=workspace_id,
+        node_type="evidence",
+        object_ref_type="claim",
+        object_ref_id=str(new_claim["claim_id"]),
+        short_label="Task6 route evidence",
+        full_description=str(new_claim["text"]),
+        claim_id=str(new_claim["claim_id"]),
+        source_ref={"source_id": new_claim["source_id"]},
+    )
+    route = STORE.create_route(
+        workspace_id=workspace_id,
+        title="Task6 contested route",
+        summary="Task6 report must include route challenge state.",
+        status="active",
+        support_score=0.5,
+        risk_score=0.7,
+        progressability_score=0.6,
+        conclusion="Task6 evidence is contested.",
+        key_supports=[],
+        assumptions=[],
+        risks=["conflicting claim"],
+        next_validation_action="review contradiction",
+        route_node_ids=[str(node["node_id"])],
+    )
 
     response = client.get(
         f"/api/v1/research/reports/{workspace_id}/cross-document",
@@ -370,8 +395,22 @@ def test_task6_cross_document_report_endpoint_returns_summary_and_sections() -> 
     assert payload["sections"]["claims"][0]["claim_id"] == old_claim["claim_id"]
     assert payload["sections"]["conflicts"][0]["conflict_id"] == conflict["conflict_id"]
     assert payload["sections"]["historical_recall"][0]["items"][0]["memory_id"] == "mem_task6_1"
+    assert payload["sections"]["routes"][0]["route_id"] == route["route_id"]
+    assert payload["sections"]["routes"][0]["route_node_ids"]["total"] == 1
+    assert payload["sections"]["challenged_routes"][0]["route_id"] == route["route_id"]
+    assert payload["sections"]["challenged_routes"][0]["challenge_status"] == "needs_review"
     assert payload["sections"]["unresolved_gaps"][0]["gap_type"] == "claim_conflict"
     assert payload["trace_refs"]["request_id"] == "req_task6_report"
+
+
+def test_task6_cross_document_report_rejects_invalid_workspace_id() -> None:
+    client = _build_test_client()
+
+    response = client.get("/api/v1/research/reports/!!/cross-document")
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "research.invalid_request"
+    assert response.json()["detail"]["details"]["errors"][0]["loc"] == ["workspace_id"]
 
 
 def test_task3_candidate_confirmation_checks_claims_after_first_50() -> None:
