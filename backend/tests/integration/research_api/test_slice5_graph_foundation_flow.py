@@ -698,6 +698,28 @@ def test_slice5_graph_manual_create_requires_claim_id() -> None:
     assert payload["details"]["reason"] == "missing_claim_id"
 
 
+def test_slice5_graph_manual_create_rejects_unknown_claim_id() -> None:
+    client = _build_test_client()
+
+    response = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": "ws_manual_claim_gate",
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_unknown_claim",
+            "short_label": "Manual node",
+            "full_description": "Manual graph writes must bind an existing claim.",
+            "claim_id": "claim_missing",
+        },
+    )
+
+    payload = response.json().get("detail", response.json())
+    assert response.status_code == 400
+    assert payload["error_code"] == "research.invalid_request"
+    assert payload["details"]["reason"] == "claim_not_found"
+
+
 def test_slice5_graph_manual_create_writes_claim_source_ref() -> None:
     client = _build_test_client()
     workspace_id = "ws_manual_claim_source_ref"

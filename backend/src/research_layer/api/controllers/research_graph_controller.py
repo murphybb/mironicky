@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import asdict
+from typing import cast
 
 from fastapi import Query, Request
 
@@ -17,6 +18,8 @@ from research_layer.api.controllers._utils import (
     error_payload_from_exception,
     ensure,
     get_request_id,
+    load_json_object,
+    parse_model,
     parse_request_model,
     raise_http_error,
     validate_workspace_id,
@@ -97,6 +100,14 @@ class ResearchGraphController(BaseController):
             "source_span": claim.get("source_span", {}),
             "trace_refs": claim.get("trace_refs", {}),
         }
+
+    def _precheck_raw_claim_id(self, *, raw_payload: dict[str, object]) -> None:
+        if str(raw_payload.get("claim_id") or "").strip():
+            return
+        self._require_projection_claim(
+            workspace_id=str(raw_payload.get("workspace_id") or ""),
+            claim_id=None,
+        )
 
     def _graph_memory_recall_for_full_graph(self, *, workspace_id: str) -> dict[str, object]:
         return self._memory_recall_service.skipped(
@@ -553,7 +564,11 @@ class ResearchGraphController(BaseController):
         responses={400: {"model": ErrorResponse}},
     )
     async def create_graph_node(self, request: Request) -> GraphNodeResponse:
-        payload = await parse_request_model(request, GraphNodeCreateRequest)
+        raw_payload = await load_json_object(request)
+        self._precheck_raw_claim_id(raw_payload=raw_payload)
+        payload = cast(
+            GraphNodeCreateRequest, parse_model(GraphNodeCreateRequest, raw_payload)
+        )
         request_id = get_request_id(request.headers.get("x-request-id"))
         claim = self._require_projection_claim(
             workspace_id=payload.workspace_id, claim_id=payload.claim_id
@@ -661,7 +676,11 @@ class ResearchGraphController(BaseController):
         },
     )
     async def create_graph_edge(self, request: Request) -> GraphEdgeResponse:
-        payload = await parse_request_model(request, GraphEdgeCreateRequest)
+        raw_payload = await load_json_object(request)
+        self._precheck_raw_claim_id(raw_payload=raw_payload)
+        payload = cast(
+            GraphEdgeCreateRequest, parse_model(GraphEdgeCreateRequest, raw_payload)
+        )
         request_id = get_request_id(request.headers.get("x-request-id"))
         claim = self._require_projection_claim(
             workspace_id=payload.workspace_id, claim_id=payload.claim_id

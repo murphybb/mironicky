@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.api.schemas.graph import GraphEdgeCreateRequest, GraphNodeCreateRequest
 from research_layer.services.claim_projection_guard_service import (
     ClaimProjectionGuardError,
     ClaimProjectionGuardService,
@@ -79,3 +80,8 @@ def test_guard_rejects_cross_workspace_claim(tmp_path) -> None:
         guard.require_claim(workspace_id="ws_other", claim_id=str(claim["claim_id"]))
 
     assert exc.value.reason == "claim_workspace_mismatch"
+
+
+def test_graph_create_schema_requires_claim_id() -> None:
+    assert "claim_id" in GraphNodeCreateRequest.model_json_schema()["required"]
+    assert "claim_id" in GraphEdgeCreateRequest.model_json_schema()["required"]
