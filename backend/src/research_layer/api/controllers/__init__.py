@@ -5,6 +5,7 @@ __all__ = [
     "ResearchRouteController",
     "ResearchGraphController",
     "ResearchConflictController",
+    "ResearchCrossDocumentReportController",
     "ResearchFailureController",
     "ResearchHypothesisController",
     "ResearchRetrievalController",

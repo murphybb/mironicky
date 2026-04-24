@@ -7,6 +7,9 @@ from research_layer.api.controllers._state_store import STORE
 from research_layer.api.controllers.research_conflict_controller import (
     ResearchConflictController,
 )
+from research_layer.api.controllers.research_cross_document_report_controller import (
+    ResearchCrossDocumentReportController,
+)
 from research_layer.api.controllers.research_graphrag_controller import (
     ResearchGraphRAGController,
 )
@@ -28,6 +31,7 @@ def _build_test_client() -> TestClient:
         ResearchJobController(),
         ResearchConflictController(),
         ResearchGraphRAGController(),
+        ResearchCrossDocumentReportController(),
     ):
         controller.register_to_app(app)
     return TestClient(app)
@@ -299,6 +303,75 @@ def test_task3_candidate_confirmation_creates_claim_conflict() -> None:
     assert items[0]["status"] == "needs_review"
     assert items[0]["conflict_type"] == "possible_contradiction"
     assert items[0]["created_request_id"] == "req_task3_second_confirm"
+
+
+def test_task6_cross_document_report_endpoint_returns_summary_and_sections() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_task6_report"
+    old_candidate = _create_candidate(workspace_id, "Task6 evidence improves recall.")
+    old_claim = STORE.create_claim_from_candidate(
+        candidate=old_candidate,
+        normalized_text=str(old_candidate["text"]).lower(),
+    )
+    new_candidate = _create_candidate(
+        workspace_id,
+        "Task6 evidence does not improve recall.",
+    )
+    new_claim = STORE.create_claim_from_candidate(
+        candidate=new_candidate,
+        normalized_text=str(new_candidate["text"]).lower(),
+    )
+    conflict = STORE.create_claim_conflict(
+        workspace_id=workspace_id,
+        new_claim_id=str(new_claim["claim_id"]),
+        existing_claim_id=str(old_claim["claim_id"]),
+        conflict_type="possible_contradiction",
+        status="needs_review",
+        evidence={"detector": "test"},
+        source_ref={"new_claim_id": new_claim["claim_id"]},
+        created_request_id="req_task6_conflict",
+    )
+    STORE.create_source_memory_recall_result(
+        workspace_id=workspace_id,
+        source_id=str(new_claim["source_id"]),
+        status="completed",
+        reason=None,
+        requested_method="logical",
+        applied_method="hybrid",
+        query_text=str(new_claim["text"]),
+        total=1,
+        items=[
+            {
+                "memory_type": "episodic_memory",
+                "memory_id": "mem_task6_1",
+                "score": 0.8,
+                "title": "Task6 prior result",
+                "snippet": "Prior result is relevant to the new claim.",
+                "linked_claim_refs": [{"claim_id": old_claim["claim_id"]}],
+                "trace_refs": {},
+            }
+        ],
+        trace_refs={"request_id": "req_task6_recall"},
+        error=None,
+        request_id="req_task6_recall",
+    )
+
+    response = client.get(
+        f"/api/v1/research/reports/{workspace_id}/cross-document",
+        headers={"x-request-id": "req_task6_report"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspace_id"] == workspace_id
+    assert payload["summary"]["claim_count"] == 2
+    assert payload["summary"]["conflict_count"] == 1
+    assert payload["summary"]["source_recall_count"] == 1
+    assert payload["sections"]["claims"][0]["claim_id"] == old_claim["claim_id"]
+    assert payload["sections"]["conflicts"][0]["conflict_id"] == conflict["conflict_id"]
+    assert payload["sections"]["historical_recall"][0]["items"][0]["memory_id"] == "mem_task6_1"
+    assert payload["sections"]["unresolved_gaps"][0]["gap_type"] == "claim_conflict"
+    assert payload["trace_refs"]["request_id"] == "req_task6_report"
 
 
 def test_task3_candidate_confirmation_checks_claims_after_first_50() -> None:

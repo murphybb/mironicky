@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.route_challenge_service import RouteChallengeService
+
+
+class CrossDocumentReportService:
+    def __init__(self, store: ResearchApiStateStore) -> None:
+        self._store = store
+        self._route_challenge_service = RouteChallengeService(store)
+
+    def build(self, *, workspace_id: str, request_id: str) -> dict[str, object]:
+        claims = self._store.list_claims(workspace_id)
+        conflicts = self._store.list_claim_conflicts(workspace_id=workspace_id)
+        recalls = self._store.list_source_memory_recall_results(
+            workspace_id=workspace_id
+        )
+        routes = self._store.list_routes(workspace_id)
+        node_map = {
+            str(node["node_id"]): node
+            for node in self._store.list_graph_nodes(workspace_id)
+        }
+        challenged_routes = self._challenged_routes(
+            workspace_id=workspace_id,
+            routes=routes,
+            conflicts=conflicts,
+            node_map=node_map,
+        )
+
+        return {
+            "workspace_id": workspace_id,
+            "summary": {
+                "claim_count": len(claims),
+                "conflict_count": len(conflicts),
+                "source_recall_count": len(recalls),
+                "route_count": len(routes),
+            },
+            "sections": {
+                "claims": [self._claim_ref(claim) for claim in claims],
+                "conflicts": [self._conflict_ref(conflict) for conflict in conflicts],
+                "historical_recall": [
+                    self._source_recall_ref(recall) for recall in recalls
+                ],
+                "unresolved_gaps": self._unresolved_gaps(
+                    conflicts=conflicts,
+                    recalls=recalls,
+                    challenged_routes=challenged_routes,
+                ),
+                "routes": [
+                    self._route_ref(route, node_map=node_map) for route in routes
+                ],
+                "challenged_routes": challenged_routes,
+            },
+            "trace_refs": {
+                "request_id": request_id,
+                "claim_ids": [str(claim["claim_id"]) for claim in claims],
+                "conflict_ids": [
+                    str(conflict["conflict_id"]) for conflict in conflicts
+                ],
+                "source_recall_ids": [
+                    str(recall["recall_id"]) for recall in recalls
+                ],
+                "route_ids": [str(route["route_id"]) for route in routes],
+            },
+        }
+
+    def _claim_ref(self, claim: dict[str, object]) -> dict[str, object]:
+        return {
+            "claim_id": str(claim["claim_id"]),
+            "source_id": str(claim["source_id"]),
+            "candidate_id": str(claim["candidate_id"]),
+            "claim_type": str(claim["claim_type"]),
+            "semantic_type": claim.get("semantic_type"),
+            "text": str(claim["text"]),
+            "status": str(claim["status"]),
+            "source_span": claim.get("source_span", {}),
+            "trace_refs": claim.get("trace_refs", {}),
+            "memory_link": claim.get("memory_link"),
+        }
+
+    def _conflict_ref(self, conflict: dict[str, object]) -> dict[str, object]:
+        return {
+            "conflict_id": str(conflict["conflict_id"]),
+            "new_claim_id": str(conflict["new_claim_id"]),
+            "existing_claim_id": str(conflict["existing_claim_id"]),
+            "conflict_type": str(conflict["conflict_type"]),
+            "status": str(conflict["status"]),
+            "evidence": conflict.get("evidence", {}),
+            "source_ref": conflict.get("source_ref", {}),
+            "decision_note": conflict.get("decision_note"),
+            "created_request_id": conflict.get("created_request_id"),
+            "resolved_request_id": conflict.get("resolved_request_id"),
+        }
+
+    def _source_recall_ref(self, recall: dict[str, object]) -> dict[str, object]:
+        return {
+            "recall_id": str(recall["recall_id"]),
+            "source_id": str(recall["source_id"]),
+            "status": str(recall["status"]),
+            "reason": recall.get("reason"),
+            "requested_method": recall.get("requested_method"),
+            "applied_method": recall.get("applied_method"),
+            "query_text": str(recall.get("query_text") or ""),
+            "total": int(recall.get("total") or 0),
+            "items": recall.get("items", []),
+            "trace_refs": recall.get("trace_refs", {}),
+            "error": recall.get("error"),
+            "request_id": recall.get("request_id"),
+        }
+
+    def _route_ref(
+        self,
+        route: dict[str, object],
+        *,
+        node_map: dict[str, dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "route_id": str(route["route_id"]),
+            "title": str(route["title"]),
+            "summary": str(route["summary"]),
+            "status": str(route["status"]),
+            "conclusion": str(route.get("conclusion") or ""),
+            "claim_ids": self._route_claim_ids(route=route, node_map=node_map),
+            "route_node_ids": route.get("route_node_ids", []),
+            "route_edge_ids": route.get("route_edge_ids", []),
+            "version_id": route.get("version_id"),
+            "request_id": route.get("request_id"),
+        }
+
+    def _challenged_routes(
+        self,
+        *,
+        workspace_id: str,
+        routes: list[dict[str, object]],
+        conflicts: list[dict[str, object]],
+        node_map: dict[str, dict[str, object]],
+    ) -> list[dict[str, object]]:
+        conflict_index = self._route_challenge_service.build_conflict_index(
+            workspace_id=workspace_id,
+            conflicts=conflicts,
+        )
+        challenged: list[dict[str, object]] = []
+        for route in routes:
+            claim_ids = self._route_claim_ids(route=route, node_map=node_map)
+            challenge = self._route_challenge_service.evaluate_route_with_conflict_index(
+                route={**route, "claim_ids": claim_ids},
+                conflict_index=conflict_index,
+            )
+            if challenge["challenge_status"] == "clean":
+                continue
+            challenged.append(
+                {
+                    "route_id": str(route["route_id"]),
+                    "title": str(route["title"]),
+                    "status": str(route["status"]),
+                    "claim_ids": claim_ids,
+                    "challenge_status": challenge["challenge_status"],
+                    "challenge_refs": {
+                        "conflict_count": challenge["conflict_count"],
+                        "conflict_ids": challenge["conflict_ids"],
+                    },
+                }
+            )
+        return challenged
+
+    def _route_claim_ids(
+        self,
+        *,
+        route: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+    ) -> list[str]:
+        claim_ids: list[str] = []
+        seen: set[str] = set()
+        for node_id in route.get("route_node_ids", []):
+            node = node_map.get(str(node_id))
+            if node is None:
+                continue
+            claim_id = str(node.get("claim_id") or "").strip()
+            if not claim_id or claim_id in seen:
+                continue
+            seen.add(claim_id)
+            claim_ids.append(claim_id)
+        return claim_ids
+
+    def _unresolved_gaps(
+        self,
+        *,
+        conflicts: list[dict[str, object]],
+        recalls: list[dict[str, object]],
+        challenged_routes: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        gaps: list[dict[str, object]] = []
+        for conflict in conflicts:
+            if str(conflict.get("status") or "") != "needs_review":
+                continue
+            gaps.append(
+                {
+                    "gap_type": "claim_conflict",
+                    "status": "needs_review",
+                    "conflict_id": str(conflict["conflict_id"]),
+                    "claim_ids": [
+                        str(conflict["new_claim_id"]),
+                        str(conflict["existing_claim_id"]),
+                    ],
+                }
+            )
+        for recall in recalls:
+            if str(recall.get("status") or "") == "completed":
+                continue
+            gaps.append(
+                {
+                    "gap_type": "source_memory_recall",
+                    "status": str(recall.get("status") or "unknown"),
+                    "recall_id": str(recall["recall_id"]),
+                    "source_id": str(recall["source_id"]),
+                    "reason": recall.get("reason"),
+                }
+            )
+        for route in challenged_routes:
+            gaps.append(
+                {
+                    "gap_type": "challenged_route",
+                    "status": str(route["challenge_status"]),
+                    "route_id": str(route["route_id"]),
+                    "conflict_ids": route["challenge_refs"]["conflict_ids"],
+                }
+            )
+        return gaps
