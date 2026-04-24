@@ -36,7 +36,7 @@ Rules:
 - If artifact_profile_json says dominant_artifact_type is formula, prioritize equation, definition, proof_step, condition, or theorem units that are directly visible in the formula block.
 - If artifact_profile_json says dominant_artifact_type is figure or caption, prioritize figure, method, result, metric, or comparison-like observations directly stated in the caption text.
 - If artifact_profile_json says dominant_artifact_type is code, prioritize code, method, dataset, metric, or result units that are explicitly described in the code/comments text.
-- Extract at most 24 core knowledge units. Prefer units that can be reused in a graph or route.
+- Extract at most 16 core knowledge units. Prefer units that can be reused in a graph or route.
 - Skip repeated, decorative, heading-only, or low-value statements.
 - Keep "text" under 180 characters, "quote" under 180 characters, and "normalized_label" under 60 characters.
 - The quote must directly say the same thing as the unit. Do not use a merely related literature-review sentence as the quote for a broad concept.

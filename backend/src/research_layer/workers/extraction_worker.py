@@ -803,7 +803,7 @@ class ExtractionWorker:
         model: str | None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], LLMCallResult | None]:
         source_id = str(source["source_id"])
-        cache_key = "candidate:argument_unit_extractor:v6_numbered_hypotheses"
+        cache_key = "candidate:argument_unit_extractor:v7_numbered_hypotheses_16"
         cached = self._store.get_source_chunk_cache(
             workspace_id=workspace_id,
             source_id=source_id,
