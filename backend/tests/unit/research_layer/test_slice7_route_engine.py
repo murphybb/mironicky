@@ -168,6 +168,52 @@ def test_slice7_candidate_builder_prefers_claim_nodes_over_evidence_titles() -> 
     assert [candidate["conclusion_node_id"] for candidate in candidates] == ["node_claim"]
 
 
+def test_slice7_candidate_builder_prefers_conclusion_over_hypothesis() -> None:
+    builder = RouteCandidateBuilder()
+    candidates = builder.build_candidates(
+        workspace_id="ws_slice7_conclusion_priority",
+        graph_nodes=[
+            {
+                "node_id": "node_hypothesis",
+                "workspace_id": "ws_slice7_conclusion_priority",
+                "node_type": "assumption",
+                "object_ref_type": "assumption",
+                "object_ref_id": "asm_1",
+                "short_label": "H1 hypothesis",
+                "status": "active",
+                "short_tags": ["hypothesis"],
+            },
+            {
+                "node_id": "node_conclusion",
+                "workspace_id": "ws_slice7_conclusion_priority",
+                "node_type": "conclusion",
+                "object_ref_type": "conclusion",
+                "object_ref_id": "con_1",
+                "short_label": "Final conclusion",
+                "status": "active",
+                "short_tags": ["conclusion"],
+            },
+        ],
+        graph_edges=[
+            {
+                "edge_id": "edge_support",
+                "workspace_id": "ws_slice7_conclusion_priority",
+                "source_node_id": "node_hypothesis",
+                "target_node_id": "node_conclusion",
+                "edge_type": "supports",
+                "object_ref_type": "relation_candidate",
+                "object_ref_id": "rel_1",
+                "strength": 0.8,
+                "status": "active",
+            }
+        ],
+        version_id="ver_conclusion_priority",
+        max_candidates=8,
+    )
+
+    assert candidates[0]["conclusion_node_id"] == "node_conclusion"
+
+
 def test_slice7_candidate_builder_ignores_superseded_graph_objects() -> None:
     builder = RouteCandidateBuilder()
     candidates = builder.build_candidates(

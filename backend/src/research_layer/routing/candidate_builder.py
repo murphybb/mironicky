@@ -154,9 +154,9 @@ class RouteCandidateBuilder:
     def _route_priority(self, node: dict[str, object]) -> int:
         node_type = str(node.get("node_type", ""))
         tags = {str(tag) for tag in node.get("short_tags", []) if str(tag).strip()}
-        if node_type == "assumption" and "hypothesis" in tags:
-            return 0
         if node_type == "conclusion":
+            return 0
+        if node_type == "assumption" and "hypothesis" in tags:
             return 1
         if node_type == "gap":
             return 2

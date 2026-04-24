@@ -2,6 +2,7 @@ from __future__ import annotations
 
 UNIT_TYPE_MAP = {
     "claim": "conclusion",
+    "conclusion": "conclusion",
     "hypothesis": "assumption",
     "premise": "assumption",
     "condition": "assumption",

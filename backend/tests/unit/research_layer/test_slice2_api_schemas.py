@@ -109,6 +109,7 @@ def test_source_import_request_rejects_unknown_input_mode() -> None:
 
 def test_prompt_b_type_maps_match_graph_compatible_types() -> None:
     assert normalize_unit_type("claim") == "conclusion"
+    assert normalize_unit_type("conclusion") == "conclusion"
     assert normalize_unit_type("evidence") == "evidence"
     assert normalize_unit_type("premise") == "assumption"
     assert normalize_unit_type("contradiction") == "conflict"

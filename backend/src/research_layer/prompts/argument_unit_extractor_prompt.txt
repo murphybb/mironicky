@@ -18,12 +18,17 @@ Rules:
 - anchor_refs_json may include artifact_type values such as text, table, figure, caption, formula, or code.
 - artifact_profile_json tells you the dominant artifact type inside this chunk. Use it to change what you extract, not to invent facts.
 - Use semantic_type values from this controlled set:
-  concept, entity, claim, hypothesis, method, result, metric, sample, dataset,
+  concept, entity, claim, conclusion, hypothesis, method, result, metric, sample, dataset,
   definition, condition, limitation, citation, equation, figure, code, theorem,
   proof_step, population, intervention, outcome, statistical_test, question.
 - Do not invent missing claims, methods, results, limitations, or citations.
 - Do not label something as limitation/question unless the text actually states uncertainty, limitation, future work, or an unresolved issue.
-- For papers, prefer this order: stated hypotheses/claims, research method/design, key positive results, key non-significant or negative results, boundary conditions, limitations/future work, then only the concepts needed to connect the chain.
+- For papers, prefer this order: final conclusion or central claim, stated hypotheses/claims, research method/design, key positive results, key non-significant or negative results, boundary conditions, limitations/future work, then only the concepts needed to connect the chain.
+- If the chunk contains explicit signals such as "研究假设", "H1", "H2", "H3", "结果表明", "研究结论", "结论", "findings", "results show", or "we conclude", reserve units for those claims before extracting descriptive facts.
+- Use semantic_type "conclusion" for the author's final answer, main finding, or stated conclusion. Use "hypothesis" only for a proposed H1/H2/H3-style claim that the paper tests.
+- Do not label sample size, age, gender, demographic composition, table row labels, or measurement descriptions as "hypothesis"; label them as sample, population, metric, method, or result as appropriate.
+- In social-science papers, when present, preserve this chain: research question or central conclusion -> H1/H2/H3 hypotheses -> variables/mediator/moderator -> sample/method -> statistical results that support, limit, or reject each hypothesis -> limitation/future work.
+- If you must choose between many numeric details and one stated conclusion/hypothesis, keep the stated conclusion/hypothesis and drop lower-level numeric details.
 - Do not spend many units on generic background concepts if doing so would omit a stated hypothesis, experiment result, boundary condition, or limitation.
 - If artifact_profile_json says dominant_artifact_type is table, prioritize metric, sample, result, condition, statistical_test, population, outcome, or intervention units that are directly visible in the table text.
 - If artifact_profile_json says dominant_artifact_type is formula, prioritize equation, definition, proof_step, condition, or theorem units that are directly visible in the formula block.
