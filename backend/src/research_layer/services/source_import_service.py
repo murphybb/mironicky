@@ -352,13 +352,23 @@ class SourceImportService:
                     "source_input_mode": resolved.source_input_mode,
                 },
             )
-            self._source_memory_recall_service.recall_for_source(
-                workspace_id=workspace_id,
-                source_id=str(source["source_id"]),
-                query_text=str(source.get("normalized_content") or source["content"]),
-                request_id=request_id,
-                trace_refs={"source_input_mode": resolved.source_input_mode},
-            )
+            try:
+                self._source_memory_recall_service.recall_for_source(
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    query_text=str(
+                        source.get("normalized_content") or source["content"]
+                    ),
+                    request_id=request_id,
+                    trace_refs={"source_input_mode": resolved.source_input_mode},
+                )
+            except Exception:
+                logger.exception(
+                    "research.source_import.memory_recall_failed req=%s workspace=%s source_id=%s",
+                    request_id,
+                    workspace_id,
+                    source["source_id"],
+                )
             source = self._store.get_source(str(source["source_id"])) or source
         except SourceImportError as exc:
             if source_id is not None:

@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from core.di.decorators import controller
 from core.interface.controller.base_controller import BaseController, get, post
+from core.observation.logger import get_logger
 from research_layer.api.controllers._job_runner import schedule_background_job
 from research_layer.api.controllers._state_store import STORE
 from research_layer.api.controllers._utils import (
@@ -68,6 +69,8 @@ from research_layer.services.candidate_confirmation_service import (
 from research_layer.services.scholarly_connector import ScholarlyProviderError
 from research_layer.services.scholarly_source_service import ScholarlySourceService
 from research_layer.workers.extraction_worker import ExtractionWorker
+
+logger = get_logger(__name__)
 
 
 @controller(name="research_source_controller")
@@ -264,18 +267,27 @@ class ResearchSourceController(BaseController):
                     query_text = candidate_text or str(
                         source.get("normalized_content") or source.get("content") or ""
                     )
-                    self._source_memory_recall_service.recall_for_source(
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        query_text=query_text,
-                        request_id=request_id,
-                        trace_refs={
-                            "context_type": "source_extract",
-                            "job_id": job_id,
-                            "candidate_batch_id": result.get("candidate_batch_id"),
-                            "candidate_count": len(candidates),
-                        },
-                    )
+                    try:
+                        self._source_memory_recall_service.recall_for_source(
+                            workspace_id=workspace_id,
+                            source_id=source_id,
+                            query_text=query_text,
+                            request_id=request_id,
+                            trace_refs={
+                                "context_type": "source_extract",
+                                "job_id": job_id,
+                                "candidate_batch_id": result.get("candidate_batch_id"),
+                                "candidate_count": len(candidates),
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "research.source_extract.memory_recall_failed req=%s workspace=%s source_id=%s job_id=%s",
+                            request_id,
+                            workspace_id,
+                            source_id,
+                            job_id,
+                        )
         except Exception as exc:  # pragma: no cover - defensive fallback
             error = {
                 "error_code": "research.extract_failure",
