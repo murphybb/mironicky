@@ -259,6 +259,11 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
       showToast('来源说明不能为空');
       return;
     }
+    const claimId = getNodeClaimId(selNode);
+    if (!claimId) {
+      showMissingClaimToast();
+      return;
+    }
     setIsCreatingNode(true);
     try {
       const created = await createGraphNode({
@@ -275,9 +280,12 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
             source_type: 'manual_note',
             note: sourceNote,
             created_from: 'workbench_add_node',
+            inherited_from_node_id: selNode.node_id,
+            claim_id: claimId,
             created_at: new Date().toISOString(),
           },
         ],
+        claim_id: claimId,
       });
       await onRefresh?.();
       setIsAddNodeOpen(false);
@@ -301,6 +309,18 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
       return false;
     }
     return true;
+  };
+
+  const getNodeClaimId = (node: any) => {
+    const claimId = String(node?.claim_id || '').trim();
+    return claimId || null;
+  };
+
+  const findNodeById = (nodeId: string | null) =>
+    (nodes || []).find((node: any) => String(node?.node_id || '') === String(nodeId || ''));
+
+  const showMissingClaimToast = () => {
+    showToast('无法入图：请选择已有 claim-backed 节点以继承 claim_id');
   };
 
   const handleAddEdge = async () => {
@@ -350,6 +370,14 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
     }
 
     try {
+      const sourceNode = findNodeById(pendingEdgeSourceId);
+      const claimId = getNodeClaimId(sourceNode) || getNodeClaimId(node);
+      if (!claimId) {
+        setIsEdgeMode(false);
+        setPendingEdgeSourceId(null);
+        showMissingClaimToast();
+        return;
+      }
       const createdEdge = await createGraphEdge({
         workspace_id: workspaceId,
         source_node_id: pendingEdgeSourceId,
@@ -358,6 +386,7 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
         object_ref_type: 'manual',
         object_ref_id: `ui-edge-${Date.now()}`,
         strength: 0.7,
+        claim_id: claimId,
       });
       setEdges((prev: any[]) => {
         if (prev.some((item: any) => String(item?.edge_id) === String(createdEdge?.edge_id))) {
@@ -419,6 +448,11 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
 
   const handleAddEvidence = async () => {
     if (!ensureSelectedNode()) return;
+    const claimId = getNodeClaimId(selNode);
+    if (!claimId) {
+      showMissingClaimToast();
+      return;
+    }
     try {
       const evidence = await createGraphNode({
         workspace_id: workspaceId,
@@ -429,7 +463,15 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
         full_description: `${selNode.short_label} 补充证据`,
         short_tags: ['补充'],
         visibility: 'workspace',
-        source_refs: [],
+        source_refs: [
+          {
+            source_type: 'manual_note',
+            created_from: 'workbench_add_evidence',
+            inherited_from_node_id: selNode.node_id,
+            claim_id: claimId,
+          },
+        ],
+        claim_id: claimId,
       });
       await createGraphEdge({
         workspace_id: workspaceId,
@@ -439,6 +481,7 @@ export function WorkbenchPage({ initialNodes, initialEdges, edgeColors, goto, sh
         object_ref_type: 'manual',
         object_ref_id: `ui-edge-${Date.now()}`,
         strength: 0.6,
+        claim_id: claimId,
       });
       await onRefresh?.();
       showToast('已补充证据');

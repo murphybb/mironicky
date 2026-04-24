@@ -720,6 +720,124 @@ def test_slice5_graph_manual_create_rejects_unknown_claim_id() -> None:
     assert payload["details"]["reason"] == "claim_not_found"
 
 
+def test_slice5_graph_manual_edge_create_requires_claim_id() -> None:
+    client = _build_test_client()
+    workspace_id = "ws_manual_edge_claim_gate"
+    _import_extract_confirm(
+        client,
+        workspace_id=workspace_id,
+        content="Claim: manual edge projections require claim provenance.",
+    )
+    claim_id = _first_claim_id(workspace_id)
+    first = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_edge_gate_1",
+            "short_label": "Manual edge gate 1",
+            "full_description": "Manual edge source.",
+            "claim_id": claim_id,
+        },
+    )
+    second = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_edge_gate_2",
+            "short_label": "Manual edge gate 2",
+            "full_description": "Manual edge target.",
+            "claim_id": claim_id,
+        },
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    response = client.post(
+        "/api/v1/research/graph/edges",
+        json={
+            "workspace_id": workspace_id,
+            "source_node_id": first.json()["node_id"],
+            "target_node_id": second.json()["node_id"],
+            "edge_type": "supports",
+            "object_ref_type": "manual_link",
+            "object_ref_id": "manual_edge_missing_claim",
+            "strength": 0.8,
+        },
+    )
+
+    payload = response.json().get("detail", response.json())
+    assert response.status_code == 400
+    assert payload["error_code"] == "research.invalid_request"
+    assert payload["details"]["reason"] == "missing_claim_id"
+
+
+def test_slice5_graph_manual_edge_create_rejects_cross_workspace_claim_id() -> None:
+    client = _build_test_client()
+    owner_workspace_id = "ws_manual_edge_claim_owner"
+    edge_workspace_id = "ws_manual_edge_claim_other"
+    _import_extract_confirm(
+        client,
+        workspace_id=owner_workspace_id,
+        content="Claim: this claim belongs to another workspace.",
+    )
+    foreign_claim_id = _first_claim_id(owner_workspace_id)
+    _import_extract_confirm(
+        client,
+        workspace_id=edge_workspace_id,
+        content="Claim: manual edge endpoints belong to this workspace.",
+    )
+    local_claim_id = _first_claim_id(edge_workspace_id)
+    first = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": edge_workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_cross_edge_1",
+            "short_label": "Manual cross edge 1",
+            "full_description": "Manual edge source.",
+            "claim_id": local_claim_id,
+        },
+    )
+    second = client.post(
+        "/api/v1/research/graph/nodes",
+        json={
+            "workspace_id": edge_workspace_id,
+            "node_type": "claim",
+            "object_ref_type": "manual_note",
+            "object_ref_id": "manual_cross_edge_2",
+            "short_label": "Manual cross edge 2",
+            "full_description": "Manual edge target.",
+            "claim_id": local_claim_id,
+        },
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    response = client.post(
+        "/api/v1/research/graph/edges",
+        json={
+            "workspace_id": edge_workspace_id,
+            "source_node_id": first.json()["node_id"],
+            "target_node_id": second.json()["node_id"],
+            "edge_type": "supports",
+            "object_ref_type": "manual_link",
+            "object_ref_id": "manual_edge_cross_workspace_claim",
+            "strength": 0.8,
+            "claim_id": foreign_claim_id,
+        },
+    )
+
+    payload = response.json().get("detail", response.json())
+    assert response.status_code == 400
+    assert payload["error_code"] == "research.invalid_request"
+    assert payload["details"]["reason"] == "claim_workspace_mismatch"
+
+
 def test_slice5_graph_manual_create_writes_claim_source_ref() -> None:
     client = _build_test_client()
     workspace_id = "ws_manual_claim_source_ref"

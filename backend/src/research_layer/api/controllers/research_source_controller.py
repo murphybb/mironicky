@@ -555,6 +555,7 @@ class ResearchSourceController(BaseController):
     <label>Object Ref ID<input id="graphNodeObjectRefId" value="obj_manual_001" /></label>
     <label>Short Label<input id="graphNodeLabel" value="Manual Graph Node" /></label>
     <label>Full Description<textarea id="graphNodeDesc" rows="3">Manual node created via real graph API.</textarea></label>
+    <label>Claim ID<input id="graphNodeClaimId" placeholder="required claim_id from this workspace" /></label>
     <label>Node ID For Update<input id="graphNodeIdForUpdate" /></label>
     <label>Node Status For Update<input id="graphNodeStatusUpdate" value="weakened" /></label>
     <button onclick="createGraphNode()">Create Node</button>
@@ -568,6 +569,7 @@ class ResearchSourceController(BaseController):
     <label>Edge Object Ref Type<input id="edgeObjectRefType" value="manual_link" /></label>
     <label>Edge Object Ref ID<input id="edgeObjectRefId" value="obj_link_001" /></label>
     <label>Strength<input id="edgeStrength" type="number" min="0" max="1" step="0.1" value="0.8" /></label>
+    <label>Claim ID<input id="edgeClaimId" placeholder="required claim_id from this workspace" /></label>
     <label>Edge ID For Update<input id="edgeIdForUpdate" /></label>
     <label>Edge Status For Update<input id="edgeStatusUpdate" value="weakened" /></label>
     <button onclick="createGraphEdge()">Create Edge</button>
@@ -807,6 +809,15 @@ class ResearchSourceController(BaseController):
 
     async function createGraphNode() {
       const workspaceId = document.getElementById("workspace").value;
+      const claimId = document.getElementById("graphNodeClaimId").value.trim();
+      if (!claimId) {
+        setOutput("create graph node blocked", {
+          error_code: "research.invalid_request",
+          message: "graph projection requires claim_id",
+          details: {reason: "missing_claim_id", workspace_id: workspaceId}
+        });
+        return;
+      }
       const res = await fetch("/api/v1/research/graph/nodes", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -816,7 +827,8 @@ class ResearchSourceController(BaseController):
           object_ref_type: document.getElementById("graphNodeObjectRefType").value,
           object_ref_id: document.getElementById("graphNodeObjectRefId").value,
           short_label: document.getElementById("graphNodeLabel").value,
-          full_description: document.getElementById("graphNodeDesc").value
+          full_description: document.getElementById("graphNodeDesc").value,
+          claim_id: claimId
         })
       });
       const payload = await res.json();
@@ -844,6 +856,15 @@ class ResearchSourceController(BaseController):
 
     async function createGraphEdge() {
       const workspaceId = document.getElementById("workspace").value;
+      const claimId = document.getElementById("edgeClaimId").value.trim();
+      if (!claimId) {
+        setOutput("create graph edge blocked", {
+          error_code: "research.invalid_request",
+          message: "graph projection requires claim_id",
+          details: {reason: "missing_claim_id", workspace_id: workspaceId}
+        });
+        return;
+      }
       const res = await fetch("/api/v1/research/graph/edges", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -854,7 +875,8 @@ class ResearchSourceController(BaseController):
           edge_type: document.getElementById("edgeType").value,
           object_ref_type: document.getElementById("edgeObjectRefType").value,
           object_ref_id: document.getElementById("edgeObjectRefId").value,
-          strength: Number(document.getElementById("edgeStrength").value || 0.8)
+          strength: Number(document.getElementById("edgeStrength").value || 0.8),
+          claim_id: claimId
         })
       });
       const payload = await res.json();

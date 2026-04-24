@@ -90,6 +90,8 @@ export interface GraphNode {
   short_tags: string[];
   visibility: string;
   source_refs: unknown[];
+  claim_id?: string | null;
+  source_ref?: Record<string, unknown>;
   status: string;
   x?: number;
   y?: number;
@@ -104,6 +106,8 @@ export interface GraphEdge {
   object_ref_type: string;
   object_ref_id: string;
   strength: number;
+  claim_id?: string | null;
+  source_ref?: Record<string, unknown>;
   status: string;
 }
 
@@ -395,12 +399,19 @@ function normalizeGraph(graph: any): GraphResponse {
     y: Number.isFinite(node?.y) ? Number(node.y) : 80 + Math.floor(index / 4) * 170,
     short_tags: Array.isArray(node?.short_tags) ? node.short_tags : [],
     source_refs: Array.isArray(node?.source_refs) ? node.source_refs : [],
+    claim_id: node?.claim_id == null ? null : String(node.claim_id),
+    source_ref: node?.source_ref && typeof node.source_ref === 'object' ? node.source_ref : {},
+  }));
+  const normalizedEdges = edges.map((edge: any) => ({
+    ...edge,
+    claim_id: edge?.claim_id == null ? null : String(edge.claim_id),
+    source_ref: edge?.source_ref && typeof edge.source_ref === 'object' ? edge.source_ref : {},
   }));
 
   return {
     workspace_id: String(graph?.workspace_id ?? ''),
     nodes: normalizedNodes,
-    edges: edges as GraphEdge[],
+    edges: normalizedEdges as GraphEdge[],
     memory_recall: normalizeMemoryRecall(graph?.memory_recall),
   };
 }
@@ -931,6 +942,7 @@ export async function createGraphNode(payload: {
   short_tags?: string[];
   visibility?: string;
   source_refs?: Record<string, unknown>[];
+  claim_id: string;
 }) {
   return request<GraphNode>(`/api/v1/research/graph/nodes`, {
     method: 'POST',
@@ -960,6 +972,7 @@ export async function createGraphEdge(payload: {
   object_ref_type: string;
   object_ref_id: string;
   strength: number;
+  claim_id: string;
 }) {
   return request<GraphEdge>(`/api/v1/research/graph/edges`, {
     method: 'POST',
