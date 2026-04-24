@@ -401,12 +401,14 @@ export interface AsyncJobAcceptedResponse {
 
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown;
+  timeoutMs?: number;
 }
 
 const JSON_HEADERS: Record<string, string> = {
   'Content-Type': 'application/json',
 };
 const REQUEST_TIMEOUT_MS = 15000;
+const SOURCE_IMPORT_TIMEOUT_MS = 300000;
 const JOB_SUCCESS_STATUSES = new Set(['succeeded', 'completed']);
 const JOB_FAILURE_STATUSES = new Set(['failed', 'cancelled', 'canceled']);
 
@@ -463,9 +465,9 @@ function toErrorEnvelope(payload: unknown): ApiErrorEnvelope {
 }
 
 async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
-  const { body, headers, signal, ...rest } = options;
+  const { body, headers, signal, timeoutMs = REQUEST_TIMEOUT_MS, ...rest } = options;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   if (signal) {
     if (signal.aborted) {
       controller.abort();
@@ -500,7 +502,7 @@ async function request<T>(url: string, options: RequestOptions = {}): Promise<T>
         {
           error_code: 'research.request_timeout',
           message: '璇锋眰瓒呮椂锛岃閲嶈瘯',
-          details: { url, timeout_ms: REQUEST_TIMEOUT_MS },
+          details: { url, timeout_ms: timeoutMs },
         },
         'Request timed out'
       );
@@ -1082,6 +1084,7 @@ export async function importSource(payload: {
   return request<any>(`/api/v1/research/sources/import`, {
     method: 'POST',
     body: payload,
+    timeoutMs: SOURCE_IMPORT_TIMEOUT_MS,
   });
 }
 
