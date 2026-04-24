@@ -1454,6 +1454,8 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
   ) && !timeoutLike;
   const terminalSucceeded = extractionStatus === 'succeeded' || extractionStatus === 'completed';
   const shouldPoll = Boolean(extractionContext?.sourceId) && !terminalFailed && !terminalSucceeded;
+  const showFailedEmptyState =
+    !shouldPoll && terminalFailed;
   const showCompletedEmptyState =
     !shouldPoll && terminalSucceeded;
 
@@ -1872,9 +1874,17 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
           <div className="cand-card">
             <div className="cand-hdr">
               <div className="cand-main">
-                <div className="cand-type">{showCompletedEmptyState ? '当前批次未产出候选' : '候选尚未就绪'}</div>
+                <div className="cand-type">
+                  {showFailedEmptyState
+                    ? '抽取失败，没有生成候选'
+                    : showCompletedEmptyState
+                    ? '当前批次未产出候选'
+                    : '候选尚未就绪'}
+                </div>
                 <div className="cand-label">
-                  {showCompletedEmptyState
+                  {showFailedEmptyState
+                    ? `请检查上方失败原因（batch=${extractionContext?.candidateBatchId || '未知'}），修复模型服务或来源问题后再重试。`
+                    : showCompletedEmptyState
                     ? `请检查文档内容可解析性（batch=${extractionContext?.candidateBatchId || '未知'}），或返回导入页重试抽取。`
                     : extractionUiState === 'timeout'
                     ? '前端轮询已超时，系统可能仍在后台同步候选结果；请稍后刷新或保留当前页面继续等待。'
