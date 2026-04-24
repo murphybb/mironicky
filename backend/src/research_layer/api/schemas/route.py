@@ -67,6 +67,11 @@ class RouteTraceRefs(BaseModel):
     conclusion_node_id: str | None = None
 
 
+class RouteChallengeRefs(BaseModel):
+    conflict_count: int = 0
+    conflict_ids: list[str] = Field(default_factory=list)
+
+
 class RouteRecord(BaseModel):
     route_id: str
     workspace_id: str
@@ -110,6 +115,9 @@ class RouteRecord(BaseModel):
     key_strengths: list[dict[str, object]] = Field(default_factory=list)
     key_risks: list[dict[str, object]] = Field(default_factory=list)
     open_questions: list[dict[str, object]] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    challenge_status: str = "clean"
+    challenge_refs: RouteChallengeRefs = Field(default_factory=RouteChallengeRefs)
     rank: int | None = None
     memory_recall: MemoryRecallResponse | None = None
 

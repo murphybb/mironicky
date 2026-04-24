@@ -34,6 +34,7 @@ from research_layer.services.route_generation_service import (
     RouteGenerationService,
     RouteGenerationServiceError,
 )
+from research_layer.services.route_challenge_service import RouteChallengeService
 from research_layer.services.recompute_service import (
     RecomputeService,
     RecomputeServiceError,
@@ -50,6 +51,7 @@ class ResearchRouteController(BaseController):
         )
         self._score_service = ScoreService(STORE)
         self._route_generation_service = RouteGenerationService(STORE)
+        self._route_challenge_service = RouteChallengeService(STORE)
         self._recompute_service = RecomputeService(STORE)
         self._route_ranker = RouteRanker()
         self._route_summarizer = RouteSummarizer()
@@ -150,6 +152,27 @@ class ResearchRouteController(BaseController):
     def _route_node_map(self, *, workspace_id: str) -> dict[str, dict[str, object]]:
         return {str(node["node_id"]): node for node in STORE.list_graph_nodes(workspace_id)}
 
+    def _materialize_route_challenge(
+        self,
+        *,
+        route: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+    ) -> dict[str, object]:
+        claim_ids = self._route_scope_claim_ids(route=route, node_map=node_map)
+        challenge = self._route_challenge_service.evaluate_route(
+            workspace_id=str(route["workspace_id"]),
+            route={**route, "claim_ids": claim_ids},
+        )
+        return {
+            **route,
+            "claim_ids": claim_ids,
+            "challenge_status": challenge["challenge_status"],
+            "challenge_refs": {
+                "conflict_count": challenge["conflict_count"],
+                "conflict_ids": challenge["conflict_ids"],
+            },
+        }
+
     @get("/routes", response_model=RouteListResponse)
     async def list_routes(
         self, workspace_id: str | None = Query(default=None)
@@ -170,7 +193,13 @@ class ResearchRouteController(BaseController):
                     persisted = {**route, "rank": index}
             materialized.append(persisted)
 
-        items = [RouteRecord.model_validate(route) for route in materialized]
+        node_map = self._route_node_map(workspace_id=workspace)
+        items = [
+            RouteRecord.model_validate(
+                self._materialize_route_challenge(route=route, node_map=node_map)
+            )
+            for route in materialized
+        ]
         return RouteListResponse(items=items, total=len(items))
 
     @get(
@@ -203,9 +232,13 @@ class ResearchRouteController(BaseController):
             details={"route_id": route_id},
         )
         node_map = self._route_node_map(workspace_id=str(route["workspace_id"]))
+        challenged_route = self._materialize_route_challenge(
+            route=route,
+            node_map=node_map,
+        )
         return RouteRecord.model_validate(
             {
-                **route,
+                **challenged_route,
                 "memory_recall": self._route_memory_recall(
                     route=route,
                     node_map=node_map,
