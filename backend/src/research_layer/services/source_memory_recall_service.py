@@ -38,14 +38,21 @@ class SourceMemoryRecallService:
                 },
             )
         except Exception as exc:
+            error = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "reason": self._normalize_reason(str(exc)),
+            }
             response = {
                 "status": "failed",
-                "reason": self._normalize_reason(str(exc)),
+                "reason": error["reason"],
                 "requested_method": requested_method,
                 "applied_method": None,
+                "query_text": self._normalize_query_text(query_text),
                 "total": 0,
                 "items": [],
                 "trace_refs": source_trace_refs,
+                "error": error,
             }
 
         items = response.get("items")
@@ -53,6 +60,21 @@ class SourceMemoryRecallService:
         trace = response.get("trace_refs")
         normalized_trace = trace if isinstance(trace, dict) else {}
         total = response.get("total")
+        persisted_query_text = self._normalize_query_text(
+            response.get("query_text")
+            if response.get("query_text") is not None
+            else query_text
+        )
+        error = (
+            response.get("error") if isinstance(response.get("error"), dict) else None
+        )
+        if error is None and str(response.get("status") or "").strip() == "failed":
+            reason = (
+                str(response.get("reason")).strip()
+                if response.get("reason") is not None
+                else "source_memory_recall_failed"
+            )
+            error = {"message": reason, "reason": self._normalize_reason(reason)}
         result = self._store.create_source_memory_recall_result(
             workspace_id=workspace_id,
             source_id=source_id,
@@ -68,9 +90,11 @@ class SourceMemoryRecallService:
                 if response.get("applied_method") is not None
                 else None
             ),
+            query_text=persisted_query_text,
             total=int(total) if isinstance(total, int) else len(normalized_items),
             items=[item for item in normalized_items if isinstance(item, dict)],
             trace_refs=normalized_trace,
+            error=error,
             request_id=request_id,
         )
         self._store.emit_event(
@@ -95,3 +119,6 @@ class SourceMemoryRecallService:
     def _normalize_reason(self, reason: str) -> str:
         normalized = str(reason or "").strip()
         return normalized[:256] if normalized else "unknown_source_recall_error"
+
+    def _normalize_query_text(self, query_text: object) -> str:
+        return " ".join(str(query_text or "").split())

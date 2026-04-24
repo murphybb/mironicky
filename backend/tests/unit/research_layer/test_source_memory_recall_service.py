@@ -30,6 +30,7 @@ def test_source_memory_recall_persists_completed_result(monkeypatch, tmp_path) -
             "reason": "logical_not_supported_by_evermemos",
             "requested_method": "logical",
             "applied_method": "hybrid",
+            "query_text": "brand attitude claim",
             "total": 1,
             "items": [
                 {
@@ -62,6 +63,7 @@ def test_source_memory_recall_persists_completed_result(monkeypatch, tmp_path) -
     assert len(loaded) == 1
     assert loaded[0]["recall_id"] == result["recall_id"]
     assert loaded[0]["total"] == 1
+    assert loaded[0]["query_text"] == "brand attitude claim"
     assert loaded[0]["items"][0]["memory_id"] == "mem_1"
     assert loaded[0]["trace_refs"]["group_id"] == "research_claims::ws_source_recall"
 
@@ -124,3 +126,12 @@ def test_source_memory_recall_persists_failed_result_when_recall_raises(tmp_path
     )
     assert loaded[0]["status"] == "failed"
     assert loaded[0]["request_id"] == "req_source_recall_failed"
+    assert loaded[0]["query_text"] == "brand attitude claim"
+    assert loaded[0]["error"]["message"] == "evermemos unavailable"
+    assert loaded[0]["error"]["type"] == "RuntimeError"
+    reloaded_source = store.get_source(str(source["source_id"]))
+    assert reloaded_source is not None
+    assert (
+        reloaded_source["memory_recall"]["error"]["message"]
+        == "evermemos unavailable"
+    )

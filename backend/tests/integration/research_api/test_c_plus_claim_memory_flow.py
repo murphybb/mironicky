@@ -26,6 +26,7 @@ def test_task2_source_import_response_and_store_include_memory_recall(monkeypatc
             "reason": "logical_not_supported_by_evermemos",
             "requested_method": kwargs["requested_method"],
             "applied_method": "hybrid",
+            "query_text": kwargs["query_text"],
             "total": 1,
             "items": [
                 {
@@ -58,6 +59,7 @@ def test_task2_source_import_response_and_store_include_memory_recall(monkeypatc
     assert response.status_code == 200
     payload = response.json()
     assert payload["memory_recall"]["status"] == "completed"
+    assert payload["memory_recall"]["query_text"] == "Claim: brand attitude changes when prior context is recalled."
     assert payload["memory_recall"]["items"][0]["memory_id"] == "mem_import_1"
     stored = STORE.list_source_memory_recall_results(
         workspace_id="ws_task2_import",
@@ -65,6 +67,7 @@ def test_task2_source_import_response_and_store_include_memory_recall(monkeypatc
     )
     assert len(stored) == 1
     assert stored[0]["request_id"] == "req_task2_import"
+    assert stored[0]["query_text"] == "Claim: brand attitude changes when prior context is recalled."
 
 
 def test_task2_source_extract_persists_explicit_memory_recall(monkeypatch) -> None:

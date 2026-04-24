@@ -239,9 +239,11 @@ class ResearchApiStateStore:
                 reason TEXT,
                 requested_method TEXT,
                 applied_method TEXT,
+                query_text TEXT,
                 total INTEGER NOT NULL,
                 items_json TEXT NOT NULL DEFAULT '[]',
                 trace_refs_json TEXT NOT NULL DEFAULT '{}',
+                error_json TEXT,
                 request_id TEXT,
                 created_at TEXT NOT NULL
             )
@@ -934,6 +936,12 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "sources", "normalized_content", "TEXT")
                 self._ensure_column(conn, "sources", "import_request_id", "TEXT")
                 self._ensure_column(conn, "sources", "last_extract_job_id", "TEXT")
+                self._ensure_column(
+                    conn, "source_memory_recall_results", "query_text", "TEXT"
+                )
+                self._ensure_column(
+                    conn, "source_memory_recall_results", "error_json", "TEXT"
+                )
                 self._ensure_column(conn, "candidates", "candidate_batch_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extraction_job_id", "TEXT")
                 self._ensure_column(conn, "candidates", "extractor_name", "TEXT")
@@ -1416,9 +1424,11 @@ class ResearchApiStateStore:
         reason: str | None,
         requested_method: str | None,
         applied_method: str | None,
+        query_text: str | None,
         total: int,
         items: list[dict[str, object]] | None,
         trace_refs: dict[str, object] | None,
+        error: dict[str, object] | None,
         request_id: str | None,
         recall_id: str | None = None,
         conn: sqlite3.Connection | None = None,
@@ -1428,9 +1438,10 @@ class ResearchApiStateStore:
             """
             INSERT INTO source_memory_recall_results (
                 recall_id, workspace_id, source_id, status, reason, requested_method,
-                applied_method, total, items_json, trace_refs_json, request_id, created_at
+                applied_method, query_text, total, items_json, trace_refs_json, error_json,
+                request_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 resolved_recall_id,
@@ -1440,9 +1451,11 @@ class ResearchApiStateStore:
                 reason,
                 requested_method,
                 applied_method,
+                query_text,
                 int(total),
                 self._dumps(items or []),
                 self._dumps(trace_refs or {}),
+                self._dumps(error) if error is not None else None,
                 request_id,
                 self._to_iso(self.now()),
             ),
@@ -1521,9 +1534,15 @@ class ResearchApiStateStore:
             "reason": row["reason"],
             "requested_method": row["requested_method"],
             "applied_method": row["applied_method"],
+            "query_text": row["query_text"],
             "total": int(row["total"] or 0),
             "items": self._loads_list(row["items_json"]),
             "trace_refs": self._loads_dict(row["trace_refs_json"]),
+            "error": (
+                self._loads_dict(row["error_json"])
+                if row["error_json"] is not None
+                else None
+            ),
             "request_id": row["request_id"],
             "created_at": self._from_iso(row["created_at"]),
         }
