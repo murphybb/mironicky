@@ -25,6 +25,8 @@ Rules:
 - Do not label something as limitation/question unless the text actually states uncertainty, limitation, future work, or an unresolved issue.
 - For papers, prefer this order: final conclusion or central claim, stated hypotheses/claims, research method/design, key positive results, key non-significant or negative results, boundary conditions, limitations/future work, then only the concepts needed to connect the chain.
 - If the chunk contains explicit signals such as "研究假设", "H1", "H2", "H3", "结果表明", "研究结论", "结论", "findings", "results show", or "we conclude", reserve units for those claims before extracting descriptive facts.
+- If numbered hypotheses such as H1/H2/H3 are visible, extract every visible numbered hypothesis as a separate unit before extracting sample sizes, demographics, brand percentages, or table metrics.
+- If a final conclusion section is visible, extract the author's final central conclusion as semantic_type "conclusion" before extracting secondary experiment details.
 - Use semantic_type "conclusion" for the author's final answer, main finding, or stated conclusion. Use "hypothesis" only for a proposed H1/H2/H3-style claim that the paper tests.
 - Do not label sample size, age, gender, demographic composition, table row labels, or measurement descriptions as "hypothesis"; label them as sample, population, metric, method, or result as appropriate.
 - In social-science papers, when present, preserve this chain: research question or central conclusion -> H1/H2/H3 hypotheses -> variables/mediator/moderator -> sample/method -> statistical results that support, limit, or reject each hypothesis -> limitation/future work.
@@ -34,7 +36,7 @@ Rules:
 - If artifact_profile_json says dominant_artifact_type is formula, prioritize equation, definition, proof_step, condition, or theorem units that are directly visible in the formula block.
 - If artifact_profile_json says dominant_artifact_type is figure or caption, prioritize figure, method, result, metric, or comparison-like observations directly stated in the caption text.
 - If artifact_profile_json says dominant_artifact_type is code, prioritize code, method, dataset, metric, or result units that are explicitly described in the code/comments text.
-- Extract at most 16 core knowledge units. Prefer units that can be reused in a graph or route.
+- Extract at most 24 core knowledge units. Prefer units that can be reused in a graph or route.
 - Skip repeated, decorative, heading-only, or low-value statements.
 - Keep "text" under 180 characters, "quote" under 180 characters, and "normalized_label" under 60 characters.
 - The quote must directly say the same thing as the unit. Do not use a merely related literature-review sentence as the quote for a broad concept.
