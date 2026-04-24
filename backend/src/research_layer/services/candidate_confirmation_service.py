@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.evermemos_bridge_service import ResearchMemoryBridge
 from research_layer.services.scholarly_source_service import ScholarlySourceService
 
 
@@ -29,6 +30,7 @@ class CandidateConfirmationService:
         self._store = store
         self._active_statuses = {"active", "weakened", "conflicted", "failed"}
         self._scholarly_source_service = ScholarlySourceService(store)
+        self._memory_bridge = ResearchMemoryBridge(store)
 
     def _node_type_for_object_type(self, object_type: str) -> str:
         return {
@@ -67,17 +69,101 @@ class CandidateConfirmationService:
             return preferred
         return f"{preferred[:max_len].rstrip()}..."
 
-    def _build_source_refs(self, candidate: dict[str, object]) -> list[dict[str, object]]:
+    def _build_source_refs(
+        self, candidate: dict[str, object], *, claim_id: str | None = None
+    ) -> list[dict[str, object]]:
         source_span = candidate.get("source_span")
         normalized_span = source_span if isinstance(source_span, dict) else {}
+        trace_refs = candidate.get("trace_refs")
+        normalized_trace_refs = trace_refs if isinstance(trace_refs, dict) else {}
         return [
             {
                 "source_id": str(candidate.get("source_id", "")),
                 "candidate_id": str(candidate.get("candidate_id", "")),
                 "candidate_batch_id": candidate.get("candidate_batch_id"),
+                "artifact_id": normalized_trace_refs.get("source_artifact_id"),
+                "anchor_id": normalized_trace_refs.get("source_anchor_id"),
+                "claim_id": claim_id,
                 "source_span": normalized_span,
+                "quote": candidate.get("quote"),
             }
         ]
+
+    def _build_graph_source_ref(
+        self,
+        *,
+        record: dict[str, object],
+        claim_id: str | None,
+    ) -> dict[str, object]:
+        source_id = str(record.get("source_id") or "").strip()
+        resolved_claim_id = str(claim_id or "").strip()
+        if not source_id or not resolved_claim_id:
+            return {}
+        source_span = record.get("source_span")
+        normalized_span = source_span if isinstance(source_span, dict) else {}
+        trace_refs = record.get("trace_refs")
+        normalized_trace_refs = trace_refs if isinstance(trace_refs, dict) else {}
+        return {
+            "source_id": source_id,
+            "candidate_id": str(record.get("candidate_id") or ""),
+            "candidate_batch_id": record.get("candidate_batch_id"),
+            "claim_id": resolved_claim_id,
+            "artifact_id": normalized_trace_refs.get("source_artifact_id"),
+            "anchor_id": normalized_trace_refs.get("source_anchor_id"),
+            "source_span": normalized_span,
+            "quote": record.get("quote"),
+        }
+
+    def _build_edge_source_ref(
+        self,
+        *,
+        source_object: dict[str, object],
+        target_object: dict[str, object],
+        relation_id: str | None,
+        relation_type: str | None,
+    ) -> dict[str, object]:
+        source_ref = self._build_graph_source_ref(
+            record=target_object,
+            claim_id=str(target_object.get("claim_id") or ""),
+        )
+        if not source_ref:
+            return {}
+        source_ref["source_claim_id"] = source_object.get("claim_id")
+        source_ref["target_claim_id"] = target_object.get("claim_id")
+        if relation_id:
+            source_ref["relation_candidate_id"] = relation_id
+        if relation_type:
+            source_ref["relation_type"] = relation_type
+        return source_ref
+
+    def _build_short_tags(self, candidate: dict[str, object]) -> list[str]:
+        semantic_type = str(candidate.get("semantic_type") or "").strip()
+        if not semantic_type:
+            return []
+        return [semantic_type]
+
+    def _require_graph_traceability(
+        self,
+        *,
+        candidate: dict[str, object],
+        claim: dict[str, object],
+    ) -> dict[str, object]:
+        source_ref = self._build_graph_source_ref(
+            record=candidate,
+            claim_id=str(claim.get("claim_id") or ""),
+        )
+        if source_ref:
+            return source_ref
+        raise CandidateConfirmationError(
+            status_code=409,
+            error_code="research.graph_projection_blocked",
+            message="candidate confirmation cannot project node without claim/source traceability",
+            details={
+                "candidate_id": candidate["candidate_id"],
+                "claim_id": claim.get("claim_id"),
+                "source_id": candidate.get("source_id"),
+            },
+        )
 
     def _list_active_nodes(
         self, workspace_id: str, *, conn: sqlite3.Connection | None = None
@@ -185,6 +271,15 @@ class CandidateConfirmationService:
             if str(source_node["node_id"]) == str(target_node["node_id"]):
                 continue
             relation_id = str(relation["relation_candidate_id"])
+            edge_source_ref = self._build_edge_source_ref(
+                source_object=source_object,
+                target_object=target_object,
+                relation_id=relation_id,
+                relation_type=relation_type,
+            )
+            target_claim_id = str(target_object.get("claim_id") or "").strip()
+            if not target_claim_id or not edge_source_ref:
+                continue
             existing_edge = self._store.find_graph_edge_by_ref(
                 workspace_id=workspace_id,
                 source_node_id=str(source_node["node_id"]),
@@ -204,6 +299,8 @@ class CandidateConfirmationService:
                     object_ref_type="relation_candidate",
                     object_ref_id=relation_id,
                     strength=0.9,
+                    claim_id=target_claim_id,
+                    source_ref=edge_source_ref,
                     status="active",
                     conn=conn,
                 )
@@ -214,6 +311,7 @@ class CandidateConfirmationService:
         self,
         *,
         candidate: dict[str, object],
+        claim: dict[str, object],
         formal_object: dict[str, str],
         request_id: str,
         conn: sqlite3.Connection | None = None,
@@ -223,6 +321,8 @@ class CandidateConfirmationService:
         candidate_id = str(candidate["candidate_id"])
         object_type = str(formal_object["object_type"])
         object_id = str(formal_object["object_id"])
+        claim_id = str(claim["claim_id"])
+        source_ref = self._require_graph_traceability(candidate=candidate, claim=claim)
 
         node = self._resolve_active_node_by_object_ref(
             workspace_id=workspace_id,
@@ -239,7 +339,10 @@ class CandidateConfirmationService:
                 object_ref_id=object_id,
                 short_label=self._build_short_label(str(candidate["text"])),
                 full_description=str(candidate["text"]),
-                source_refs=self._build_source_refs(candidate),
+                short_tags=self._build_short_tags(candidate),
+                source_refs=self._build_source_refs(candidate, claim_id=claim_id),
+                claim_id=claim_id,
+                source_ref=source_ref,
                 status="active",
                 conn=conn,
             )
@@ -298,6 +401,11 @@ class CandidateConfirmationService:
                     object_ref_type=object_type,
                     object_ref_id=object_id,
                     strength=0.8,
+                    claim_id=claim_id,
+                    source_ref={
+                        **source_ref,
+                        "anchor_claim_id": anchor.get("claim_id"),
+                    },
                     status="active",
                     conn=conn,
                 )
@@ -309,6 +417,7 @@ class CandidateConfirmationService:
             "candidate_batch_id": candidate.get("candidate_batch_id"),
             "formal_object_type": object_type,
             "formal_object_id": object_id,
+            "claim_id": claim_id,
             "source_id": source_id,
             "request_id": request_id,
             "added": {
@@ -482,11 +591,17 @@ class CandidateConfirmationService:
             raise error
 
         formal_object: dict[str, str] | None = None
+        claim: dict[str, object] | None = None
         try:
             def _confirm_txn(
                 conn: sqlite3.Connection,
-            ) -> tuple[dict[str, str], dict[str, object]]:
-                nonlocal formal_object
+            ) -> tuple[dict[str, object], dict[str, str], dict[str, object]]:
+                nonlocal claim, formal_object
+                claim = self._store.create_claim_from_candidate(
+                    candidate=candidate,
+                    normalized_text=normalized_text,
+                    conn=conn,
+                )
                 formal_object = self._store.create_confirmed_object_from_candidate(
                     candidate=candidate,
                     normalized_text=normalized_text,
@@ -524,15 +639,34 @@ class CandidateConfirmationService:
                     },
                     conn=conn,
                 )
+                self._store.emit_event(
+                    event_name="claim_created",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=str(candidate["source_id"]),
+                    candidate_batch_id=candidate.get("candidate_batch_id"),
+                    component="candidate_confirmation_service",
+                    step="claim_create",
+                    status="completed",
+                    refs={
+                        "candidate_id": candidate_id,
+                        "claim_id": claim["claim_id"],
+                        "claim_type": claim["claim_type"],
+                        "source_id": candidate["source_id"],
+                    },
+                    conn=conn,
+                )
                 graph_result = self._materialize_graph_version_for_confirmation(
                     candidate=candidate,
+                    claim=claim,
                     formal_object=formal_object,
                     request_id=request_id,
                     conn=conn,
                 )
-                return formal_object, graph_result
+                return claim, formal_object, graph_result
 
-            formal_object, graph_result = self._store.run_in_transaction(_confirm_txn)
+            claim, formal_object, graph_result = self._store.run_in_transaction(_confirm_txn)
         except CandidateConfirmationError:
             raise
         except Exception as exc:
@@ -572,9 +706,36 @@ class CandidateConfirmationService:
             )
             raise error
         assert formal_object is not None
+        assert claim is not None
+        try:
+            memory_link = self._memory_bridge.sync_claim(claim=claim, request_id=request_id)
+        except Exception as exc:  # pragma: no cover - defensive best-effort guard
+            self._store.emit_event(
+                event_name="claim_memory_bridge_completed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                source_id=str(candidate["source_id"]),
+                candidate_batch_id=candidate.get("candidate_batch_id"),
+                component="candidate_confirmation_service",
+                step="memory_bridge",
+                status="failed",
+                refs={"claim_id": claim["claim_id"], "reason": "bridge_service_exception"},
+                error={"message": str(exc)},
+            )
+            memory_link = {
+                "claim_id": claim["claim_id"],
+                "memory_id": None,
+                "sync_mode": "best_effort_record",
+                "status": "failed",
+                "reason": "bridge_service_exception",
+                "last_error": {"message": str(exc)},
+            }
         return {
             "candidate_id": candidate_id,
             "candidate_status": "confirmed",
+            "claim_id": claim["claim_id"],
+            "claim_memory_sync_status": memory_link["status"],
             "formal_object_type": formal_object["object_type"],
             "formal_object_id": formal_object["object_id"],
             "graph_node_id": graph_result["graph_node_id"],

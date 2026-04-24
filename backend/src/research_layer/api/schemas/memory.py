@@ -6,18 +6,55 @@ from pydantic import BaseModel, Field
 
 from research_layer.api.schemas.common import WorkspaceScopedBody
 from research_layer.api.schemas.hypothesis import HypothesisResponse
-from research_layer.api.schemas.retrieval import RETRIEVAL_VIEW_VALUES, RETRIEVE_METHOD_VALUES
+
+
+def _retrieval_view_values() -> set[str]:
+    from research_layer.api.schemas.retrieval import RETRIEVAL_VIEW_VALUES
+
+    return RETRIEVAL_VIEW_VALUES
+
+
+def _retrieve_method_values() -> set[str]:
+    from research_layer.api.schemas.retrieval import RETRIEVE_METHOD_VALUES
+
+    return RETRIEVE_METHOD_VALUES
 
 
 class MemoryListRequest(WorkspaceScopedBody):
     view_types: list[str] = Field(
-        default_factory=lambda: sorted(RETRIEVAL_VIEW_VALUES),
+        default_factory=lambda: sorted(_retrieval_view_values()),
         min_length=1,
     )
     query: str = ""
     retrieve_method: str = Field(default="hybrid")
     top_k_per_view: int = Field(default=20, ge=1, le=100)
     metadata_filters_by_view: dict[str, dict[str, object]] = Field(default_factory=dict)
+
+
+class MemoryRecallClaimRef(BaseModel):
+    claim_id: str
+
+
+class MemoryRecallItem(BaseModel):
+    memory_type: str
+    memory_id: str
+    score: float
+    title: str
+    snippet: str
+    timestamp: str | None = None
+    linked_claim_refs: list[MemoryRecallClaimRef] = Field(default_factory=list)
+    trace_refs: dict[str, object] = Field(default_factory=dict)
+
+
+class MemoryRecallResponse(BaseModel):
+    status: str
+    requested_method: str
+    applied_method: str
+    reason: str | None = None
+    query_text: str = ""
+    total: int = 0
+    items: list[MemoryRecallItem] = Field(default_factory=list)
+    trace_refs: dict[str, object] = Field(default_factory=dict)
 
 
 class MemoryRetrievalContext(BaseModel):
@@ -101,13 +138,13 @@ class MemoryToHypothesisCandidateResponse(BaseModel):
 
 def validate_memory_view_type(value: str) -> str:
     normalized = str(value).strip()
-    if normalized not in RETRIEVAL_VIEW_VALUES:
+    if normalized not in _retrieval_view_values():
         raise ValueError(f"unsupported memory view_type: {value}")
     return normalized
 
 
 def validate_retrieve_method(value: str) -> str:
     normalized = str(value).strip().lower()
-    if normalized not in RETRIEVE_METHOD_VALUES:
+    if normalized not in _retrieve_method_values():
         raise ValueError(f"unsupported retrieve_method: {value}")
     return normalized

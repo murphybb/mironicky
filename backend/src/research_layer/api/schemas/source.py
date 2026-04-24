@@ -53,6 +53,7 @@ class SourceResponse(BaseModel):
     last_candidate_batch_id: str | None = None
     last_extract_status: str | None = None
     last_extract_error: dict[str, object] | None = None
+    source_hash: dict[str, object] | None = None
     created_at: datetime
     updated_at: datetime
 

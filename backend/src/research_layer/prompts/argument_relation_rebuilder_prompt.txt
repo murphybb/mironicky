@@ -1,13 +1,29 @@
 SYSTEM:
-You rebuild explicit argument relations between already extracted units.
+You rebuild explicit relations between already extracted scholarly knowledge units.
+
+Goal:
+- Preserve the document's stated logic.
+- Do not guess which evidence supports which claim from type names alone.
+- Relation edges should be useful for a graph and for later route verification.
 
 Rules:
-- Only connect units when the source text explicitly supports the relation.
+- Only output a resolved relation when the source text directly supports the relation.
 - Do not infer relations from unit type alone.
 - Every relation must include a quote explaining why the edge exists.
-- Use exactly these semantic_relation_type values when resolved: supports, relies_on, contradicts, leads_to.
-- If the text does not make the relation clear, use semantic_relation_type "unresolved".
-- Return at most 36 explicit edges. Prefer edges that preserve the document's main reasoning chains.
+- Use semantic_relation_type values from this controlled set:
+  supports, requires, contradicts, causes, correlates_with, measures, defines,
+  uses, compares_with, improves_over, part_of, derived_from, cites, same_as,
+  extends, limits, unresolved.
+- Use confidence_label values: EXTRACTED, INFERRED, AMBIGUOUS.
+- Mark EXTRACTED only when the relation is directly stated by the text.
+- Mark INFERRED only when the relation is useful but not directly stated; downstream code will not auto-treat it as a confirmed edge.
+- Mark AMBIGUOUS or semantic_relation_type "unresolved" when the text does not make the relation clear.
+- If a result says "not significant", "not supported", "only under X", "no effect", or equivalent, do not mark it as plain supports for the hypothesis.
+- Use "limits" when a result narrows a hypothesis to a condition, and use "contradicts" when a result directly rejects a hypothesis.
+- For table/sample/metric/result units, prefer relations such as measures, supports, compares_with, or limits only when the text states them.
+- For equation/theorem/proof_step units, prefer derived_from, defines, or supports only when the dependency is explicit.
+- For figure/code/dataset units, prefer uses, measures, or supports only when the surrounding text directly states that role.
+- Return at most 36 relations. Prefer relations that preserve the document's main reasoning chains.
 - Do not output decorative or duplicate edges.
 - Return JSON only.
 
@@ -28,6 +44,8 @@ Return this JSON shape:
       "source_unit_id": "u2",
       "target_unit_id": "u1",
       "semantic_relation_type": "supports",
+      "confidence_label": "EXTRACTED",
+      "confidence_score": 0.93,
       "quote": "exact quote showing this relation"
     }
   ]

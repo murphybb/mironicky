@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import io
 import re
 import time
@@ -172,6 +173,9 @@ class _ResolvedSourceImport:
     title: str
     content: str
     metadata: dict[str, object]
+    raw_payload: bytes
+    parser_name: str
+    parser_version: str | None
 
 
 @dataclass(frozen=True)
@@ -179,6 +183,7 @@ class StructuredPdfBlock:
     page_number: int
     block_index: int
     text: str
+    raw_text: str
     anchor_id: str
     start: int
     end: int
@@ -233,6 +238,7 @@ class SourceImportService:
             payload_bytes
         )
 
+        source_id: str | None = None
         try:
             resolved = self._resolve_source_payload(
                 source_type=source_type,
@@ -260,15 +266,76 @@ class SourceImportService:
                     "source_input_mode": resolved.source_input_mode,
                 },
             )
-            source = self._store.create_source(
-                source_id=source_id,
-                workspace_id=workspace_id,
-                source_type=source_type,
-                title=resolved.title,
-                content=resolved.content,
-                metadata=resolved.metadata,
-                import_request_id=request_id,
-            )
+
+            def _persist_source_txn(conn):
+                source = self._store.create_source(
+                    source_id=source_id,
+                    workspace_id=workspace_id,
+                    source_type=source_type,
+                    title=resolved.title,
+                    content=resolved.content,
+                    metadata=resolved.metadata,
+                    import_request_id=request_id,
+                    conn=conn,
+                )
+                source_artifacts = self._store.replace_source_artifacts(
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    artifacts=self._build_source_artifacts(
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                        resolved=resolved,
+                    ),
+                    conn=conn,
+                )
+                self._store.emit_event(
+                    event_name="source_artifacts_recorded",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    component="source_import_service",
+                    step="artifact_record",
+                    status="completed",
+                    refs={
+                        "source_id": source["source_id"],
+                        "artifacts_count": len(source_artifacts),
+                        "source_input_mode": resolved.source_input_mode,
+                    },
+                    metrics={"artifacts_count": len(source_artifacts)},
+                    conn=conn,
+                )
+                source_hash = self._store.create_source_hash(
+                    source_id=str(source["source_id"]),
+                    workspace_id=workspace_id,
+                    raw_sha256=self._sha256_bytes(resolved.raw_payload),
+                    content_sha256=self._sha256_text(resolved.content),
+                    parser_name=resolved.parser_name,
+                    parser_version=resolved.parser_version,
+                    conn=conn,
+                )
+                self._store.emit_event(
+                    event_name="source_hash_recorded",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    component="source_import_service",
+                    step="hash_record",
+                    status="completed",
+                    refs={
+                        "source_id": source["source_id"],
+                        "source_hash_id": source_hash["source_hash_id"],
+                        "parser_name": source_hash["parser_name"],
+                        "parser_version": source_hash["parser_version"],
+                    },
+                    conn=conn,
+                )
+                reloaded = self._store.get_source(str(source["source_id"]), conn=conn)
+                assert reloaded is not None
+                return reloaded
+
+            source = self._store.run_in_transaction(_persist_source_txn)
             self._store.emit_event(
                 event_name="source_import_completed",
                 request_id=request_id,
@@ -284,6 +351,23 @@ class SourceImportService:
                 },
             )
         except SourceImportError as exc:
+            if source_id is not None:
+                self._store.emit_event(
+                    event_name="source_import_failed",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    component="source_import_service",
+                    step="import",
+                    status="failed",
+                    refs={"source_input_mode": mode_hint},
+                    error={
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "details": exc.details,
+                    },
+                )
             elapsed = max(time.perf_counter() - started_at, 0.0)
             _source_import_total.labels(
                 source_input_mode=mode_hint,
@@ -303,6 +387,49 @@ class SourceImportService:
                 exc.message,
             )
             raise
+        except Exception as exc:
+            error = SourceImportError(
+                error_code="research.source_hash_persistence_failed",
+                message="source import persistence failed",
+                details={"reason": str(exc)},
+                status_code=500,
+            )
+            if source_id is not None:
+                self._store.emit_event(
+                    event_name="source_import_failed",
+                    request_id=request_id,
+                    job_id=None,
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    component="source_import_service",
+                    step="persist",
+                    status="failed",
+                    refs={"source_input_mode": mode_hint},
+                    error={
+                        "error_code": error.error_code,
+                        "message": error.message,
+                        "details": error.details,
+                    },
+                )
+            elapsed = max(time.perf_counter() - started_at, 0.0)
+            _source_import_total.labels(
+                source_input_mode=mode_hint,
+                outcome="failed",
+            ).inc()
+            _source_import_duration_seconds.labels(
+                source_input_mode=mode_hint,
+                outcome="failed",
+            ).observe(elapsed)
+            logger.warning(
+                "research.source_import.failed req=%s workspace=%s mode=%s elapsed_ms=%d code=%s message=%s",
+                request_id,
+                workspace_id,
+                mode_hint,
+                int(elapsed * 1000),
+                error.error_code,
+                error.message,
+            )
+            raise error from exc
 
         elapsed = max(time.perf_counter() - started_at, 0.0)
         mode_label = resolved.source_input_mode
@@ -324,6 +451,146 @@ class SourceImportService:
             len(resolved.content),
         )
         return source
+
+    def _sha256_bytes(self, payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
+
+    def _sha256_text(self, text: str) -> str:
+        return self._sha256_bytes(text.encode("utf-8"))
+
+    def _build_source_artifacts(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        resolved: _ResolvedSourceImport,
+    ) -> list[dict[str, object]]:
+        parser_metadata = resolved.metadata.get("parser_metadata")
+        if isinstance(parser_metadata, dict):
+            blocks = parser_metadata.get("blocks")
+            parser_name = str(parser_metadata.get("parser") or resolved.parser_name)
+            if isinstance(blocks, list) and blocks:
+                artifacts = self._build_pdf_source_artifacts(
+                    workspace_id=workspace_id,
+                    source_id=source_id,
+                    parser_name=parser_name,
+                    blocks=blocks,
+                )
+                if artifacts:
+                    return artifacts
+        return [
+            self._build_fallback_source_artifact(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                resolved=resolved,
+            )
+        ]
+
+    def _build_pdf_source_artifacts(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        parser_name: str,
+        blocks: list[object],
+    ) -> list[dict[str, object]]:
+        artifacts: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            page_value = block.get("page_number")
+            block_index_value = block.get("block_index")
+            anchor_id = str(block.get("anchor_id") or "").strip()
+            if not anchor_id:
+                page_hint = self._coerce_optional_int(page_value)
+                block_hint = self._coerce_optional_int(block_index_value)
+                if page_hint is None or block_hint is None:
+                    continue
+                anchor_id = f"p{page_hint}-b{block_hint}"
+            if anchor_id in seen:
+                continue
+            seen.add(anchor_id)
+            content = self._normalize_whitespace(
+                str(block.get("text") or block.get("raw_text") or "")
+            )
+            if not content:
+                continue
+            paragraph_ids = [
+                str(value).strip()
+                for value in list(block.get("paragraph_ids") or [])
+                if str(value).strip()
+            ]
+            page_number = self._coerce_optional_int(page_value)
+            block_index = self._coerce_optional_int(block_index_value)
+            artifacts.append(
+                {
+                    "artifact_id": self._artifact_id_for_anchor(
+                        source_id=source_id, anchor_id=anchor_id
+                    ),
+                    "workspace_id": workspace_id,
+                    "source_id": source_id,
+                    "artifact_type": "text",
+                    "anchor_id": anchor_id,
+                    "page": page_number,
+                    "block_id": anchor_id,
+                    "paragraph_id": paragraph_ids[0] if paragraph_ids else None,
+                    "section_path": [],
+                    "caption": None,
+                    "content": content,
+                    "locator": {
+                        "start": self._coerce_optional_int(block.get("start")),
+                        "end": self._coerce_optional_int(block.get("end")),
+                        "page": page_number,
+                        "block_index": block_index,
+                        "block_id": anchor_id,
+                        "paragraph_ids": paragraph_ids,
+                    },
+                    "metadata": {
+                        "parser": parser_name,
+                        "raw_text": str(block.get("raw_text") or ""),
+                    },
+                }
+            )
+        return artifacts
+
+    def _build_fallback_source_artifact(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        resolved: _ResolvedSourceImport,
+    ) -> dict[str, object]:
+        anchor_id = "body"
+        return {
+            "artifact_id": self._artifact_id_for_anchor(
+                source_id=source_id, anchor_id=anchor_id
+            ),
+            "workspace_id": workspace_id,
+            "source_id": source_id,
+            "artifact_type": "text",
+            "anchor_id": anchor_id,
+            "page": None,
+            "block_id": anchor_id,
+            "paragraph_id": None,
+            "section_path": [],
+            "caption": None,
+            "content": resolved.content,
+            "locator": {"start": 0, "end": len(resolved.content)},
+            "metadata": {"parser": resolved.parser_name},
+        }
+
+    def _artifact_id_for_anchor(self, *, source_id: str, anchor_id: str) -> str:
+        safe_anchor = re.sub(r"[^A-Za-z0-9_-]+", "_", anchor_id).strip("_")
+        return f"art_{source_id}_{safe_anchor}"
+
+    def _coerce_optional_int(self, value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _resolve_source_payload(
         self,
@@ -420,6 +687,9 @@ class SourceImportService:
             content=manual_content,
             metadata=metadata,
             detected_url=None,
+            raw_payload=manual_content.encode("utf-8"),
+            parser_name="manual_text",
+            parser_version="v1",
         )
 
     def _resolve_url_payload(
@@ -460,6 +730,9 @@ class SourceImportService:
             content=extracted_text,
             metadata=metadata_with_url,
             detected_url=canonical_url,
+            raw_payload=html.encode("utf-8"),
+            parser_name="html_text_extractor",
+            parser_version="v1",
         )
 
     def _resolve_local_file_payload(
@@ -537,6 +810,13 @@ class SourceImportService:
             content=normalized_text,
             metadata=metadata_with_file,
             detected_url=None,
+            raw_payload=file_bytes,
+            parser_name=(
+                str((parser_metadata or {}).get("parser") or "pdf")
+                if suffix == ".pdf"
+                else "docx_xml"
+            ),
+            parser_version="v1",
         )
 
     def _fetch_url_html(self, source_url: str) -> str:
@@ -730,7 +1010,8 @@ class SourceImportService:
         text_parts: list[str] = []
         offset = 0
         for page_number, block_index, raw_text in page_blocks:
-            text = self._normalize_whitespace(raw_text)
+            normalized_raw_text = self._normalize_pdf_block_raw_text(raw_text)
+            text = self._normalize_whitespace(normalized_raw_text)
             if not text:
                 continue
             if text_parts:
@@ -743,6 +1024,7 @@ class SourceImportService:
                     page_number=page_number,
                     block_index=block_index,
                     text=text,
+                    raw_text=normalized_raw_text,
                     anchor_id=anchor_id,
                     start=start,
                     end=end,
@@ -795,10 +1077,20 @@ class SourceImportService:
                     "start": block.start,
                     "end": block.end,
                     "text": block.text,
+                    "raw_text": block.raw_text,
                 }
                 for block in document.blocks
             ],
         }
+
+    def _normalize_pdf_block_raw_text(self, raw_text: object) -> str:
+        text = str(raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.rstrip() for line in text.split("\n")]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines)
 
     def _finalize_source_payload(
         self,
@@ -809,6 +1101,9 @@ class SourceImportService:
         content: str,
         metadata: dict[str, object],
         detected_url: str | None,
+        raw_payload: bytes,
+        parser_name: str,
+        parser_version: str | None,
     ) -> _ResolvedSourceImport:
         normalized_title = self._normalize_whitespace(title)
         normalized_content = self._sanitize_source_content(content)
@@ -857,6 +1152,9 @@ class SourceImportService:
             title=normalized_title,
             content=normalized_content,
             metadata=normalized_metadata,
+            raw_payload=raw_payload,
+            parser_name=parser_name,
+            parser_version=parser_version,
         )
 
     def _derive_title(self, content: str, source_type: str) -> str:

@@ -259,7 +259,7 @@ class RouteSummarizer:
             conclusion_node.get("short_label", "").strip() or conclusion_node["node_id"]
         )
         conclusion_label = self._compact_label(conclusion_label_raw, max_len=40)
-        title = f"Route: {conclusion_label}"
+        title = f"路线：{conclusion_label}"
         all_route_nodes = [
             self._node_ref(node_map.get(node_id), fallback_node_id=node_id)
             for node_id in route_node_ids
@@ -300,14 +300,14 @@ class RouteSummarizer:
         }
 
     def _build_fallback_summary(self, *, structured: dict[str, object]) -> dict[str, object]:
-        conclusion = str(structured["conclusion"]).strip() or "current route conclusion"
+        conclusion = str(structured["conclusion"]).strip() or "当前路线结论"
         risk_count = len(structured["conflict_failure_hints"])
         support_count = len(structured["key_support_evidence"])
         assumption_count = len(structured["key_assumptions"])
         summary = (
-            f"Route centers on {conclusion}. "
-            f"Current supports: {support_count}, assumptions: {assumption_count}, risks: {risk_count}. "
-            "Treat this summary as degraded and verify key nodes before decision."
+            f"这条路线围绕“{conclusion}”。"
+            f"当前包含 {support_count} 个支撑节点、{assumption_count} 个前提节点、{risk_count} 个风险节点。"
+            "该摘要为降级结果，使用前必须回到关键节点和来源材料核验。"
         )
         return {
             **structured,
@@ -403,14 +403,10 @@ class RouteSummarizer:
                     message=f"{field_name}.node_refs must be array",
                     details={"field": field_name},
                 )
-            node_refs = [str(node_id) for node_id in node_refs_values]
-            unknown = [node_id for node_id in node_refs if node_id not in allowed_node_ids]
-            if unknown:
-                raise ResearchLLMError(
-                    status_code=502,
-                    error_code="research.llm_invalid_output",
-                    message=f"{field_name}.node_refs contain unknown node ids",
-                    details={"field": field_name, "unknown_node_refs": unknown},
-                )
+            node_refs = [
+                str(node_id)
+                for node_id in node_refs_values
+                if str(node_id) in allowed_node_ids
+            ]
             normalized.append({"text": text, "node_refs": node_refs})
         return normalized

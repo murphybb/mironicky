@@ -38,6 +38,7 @@ from research_layer.services.recompute_service import (
     RecomputeService,
     RecomputeServiceError,
 )
+from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
 from research_layer.services.score_service import ScoreService, ScoreServiceError
 
 
@@ -52,6 +53,102 @@ class ResearchRouteController(BaseController):
         self._recompute_service = RecomputeService(STORE)
         self._route_ranker = RouteRanker()
         self._route_summarizer = RouteSummarizer()
+        self._memory_recall_service = EverMemOSRecallService(STORE)
+
+    def _route_scope_claim_ids(
+        self,
+        *,
+        route: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+    ) -> list[str]:
+        claim_ids: list[str] = []
+        seen: set[str] = set()
+        for node_id in route.get("route_node_ids", []):
+            node = node_map.get(str(node_id))
+            if node is None:
+                continue
+            claim_id = str(node.get("claim_id") or "").strip()
+            if not claim_id or claim_id in seen:
+                continue
+            seen.add(claim_id)
+            claim_ids.append(claim_id)
+        return claim_ids
+
+    def _route_query_text(
+        self,
+        *,
+        route: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+        claim_ids: list[str],
+    ) -> str:
+        parts: list[str] = []
+        for field in ("title", "summary", "conclusion", "next_validation_action"):
+            value = str(route.get(field) or "").strip()
+            if value and value not in parts:
+                parts.append(value)
+        for claim_id in claim_ids[:4]:
+            claim = STORE.get_claim(claim_id)
+            if claim is None:
+                continue
+            claim_text = str(claim.get("text") or "").strip()
+            if claim_text and claim_text not in parts:
+                parts.append(claim_text)
+        for node_id in route.get("route_node_ids", [])[:4]:
+            node = node_map.get(str(node_id))
+            if node is None:
+                continue
+            label = str(node.get("short_label") or "").strip()
+            if label and label not in parts:
+                parts.append(label)
+        return " ".join(parts[:6]).strip()
+
+    def _route_memory_recall(
+        self,
+        *,
+        route: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+        request_id: str,
+    ) -> dict[str, object]:
+        claim_ids = self._route_scope_claim_ids(route=route, node_map=node_map)
+        if not claim_ids:
+            return self._memory_recall_service.failed(
+                workspace_id=str(route["workspace_id"]),
+                requested_method="logical",
+                reason="route_missing_claim_scope",
+                query_text=None,
+                request_id=request_id,
+                trace_refs={"route_id": str(route["route_id"])},
+            )
+        query_text = self._route_query_text(
+            route=route,
+            node_map=node_map,
+            claim_ids=claim_ids,
+        )
+        if not query_text:
+            return self._memory_recall_service.failed(
+                workspace_id=str(route["workspace_id"]),
+                requested_method="logical",
+                reason="route_missing_recall_query",
+                query_text=None,
+                request_id=request_id,
+                trace_refs={
+                    "route_id": str(route["route_id"]),
+                    "route_node_ids": route.get("route_node_ids", []),
+                },
+            )
+        return self._memory_recall_service.recall(
+            workspace_id=str(route["workspace_id"]),
+            query_text=query_text,
+            requested_method="logical",
+            scope_claim_ids=claim_ids,
+            scope_mode="require",
+            top_k=8,
+            request_id=request_id,
+            trace_refs={"route_id": str(route["route_id"])},
+        )
+
+    def _route_node_map(self, *, workspace_id: str) -> dict[str, dict[str, object]]:
+        return {str(node["node_id"]): node for node in STORE.list_graph_nodes(workspace_id)}
 
     @get("/routes", response_model=RouteListResponse)
     async def list_routes(
@@ -86,9 +183,10 @@ class ResearchRouteController(BaseController):
         },
     )
     async def get_route(
-        self, route_id: str, workspace_id: str | None = Query(default=None)
+        self, route_id: str, request: Request, workspace_id: str | None = Query(default=None)
     ) -> RouteRecord:
         workspace = validate_workspace_id(workspace_id)
+        request_id = get_request_id(request.headers.get("x-request-id"))
         route = STORE.get_route(route_id)
         ensure(
             route is not None,
@@ -104,7 +202,17 @@ class ResearchRouteController(BaseController):
             message="workspace_id does not match route ownership",
             details={"route_id": route_id},
         )
-        return RouteRecord.model_validate(route)
+        node_map = self._route_node_map(workspace_id=str(route["workspace_id"]))
+        return RouteRecord.model_validate(
+            {
+                **route,
+                "memory_recall": self._route_memory_recall(
+                    route=route,
+                    node_map=node_map,
+                    request_id=request_id,
+                ),
+            }
+        )
 
     @get(
         "/routes/{route_id}/preview",
@@ -116,9 +224,10 @@ class ResearchRouteController(BaseController):
         },
     )
     async def preview_route(
-        self, route_id: str, workspace_id: str | None = Query(default=None)
+        self, route_id: str, request: Request, workspace_id: str | None = Query(default=None)
     ) -> RoutePreviewResponse:
         workspace = validate_workspace_id(workspace_id)
+        request_id = get_request_id(request.headers.get("x-request-id"))
         route = STORE.get_route(route_id)
         ensure(
             route is not None,
@@ -134,10 +243,7 @@ class ResearchRouteController(BaseController):
             message="workspace_id does not match route ownership",
             details={"route_id": route_id},
         )
-        node_map = {
-            str(node["node_id"]): node
-            for node in STORE.list_graph_nodes(str(route["workspace_id"]))
-        }
+        node_map = self._route_node_map(workspace_id=str(route["workspace_id"]))
         def node_ref(node_id: str) -> dict[str, object]:
             node = node_map.get(node_id)
             if node is None:
@@ -202,6 +308,11 @@ class ResearchRouteController(BaseController):
                     "route_edge_ids": route.get("route_edge_ids", []),
                     "conclusion_node_id": route.get("conclusion_node_id"),
                 },
+                "memory_recall": self._route_memory_recall(
+                    route=route,
+                    node_map=node_map,
+                    request_id=request_id,
+                ),
             }
         )
 

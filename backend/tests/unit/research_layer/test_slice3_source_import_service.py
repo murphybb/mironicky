@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import sqlite3
 import zipfile
 from datetime import datetime
 
@@ -51,9 +53,53 @@ def test_source_import_service_manual_text_mode_persists_source(tmp_path) -> Non
         request_id="req_manual_01",
     )
 
+    artifacts = store.list_source_artifacts(
+        workspace_id="ws_manual_01",
+        source_id=str(source["source_id"]),
+    )
+
     assert source["workspace_id"] == "ws_manual_01"
     assert source["title"] == "Manual Import"
     assert source["metadata"]["source_input_mode"] == "manual_text"
+    assert len(artifacts) == 1
+    assert artifacts[0]["artifact_id"] == f"art_{source['source_id']}_body"
+    assert artifacts[0]["anchor_id"] == "body"
+    assert artifacts[0]["content"] == source["content"]
+
+
+def test_source_import_service_persists_source_hash_record(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    service = SourceImportService(store)
+    raw_text = "Claim: manual hash persists."
+
+    source = service.import_source(
+        workspace_id="ws_manual_hash_01",
+        source_type="paper",
+        title="Manual Hash Import",
+        content=raw_text,
+        metadata={},
+        source_input_mode="manual_text",
+        request_id="req_manual_hash_01",
+    )
+
+    source_hash = source["source_hash"]
+    assert source_hash is not None
+    assert source_hash["raw_sha256"] == hashlib.sha256(
+        raw_text.encode("utf-8")
+    ).hexdigest()
+    assert source_hash["content_sha256"] == hashlib.sha256(
+        source["content"].encode("utf-8")
+    ).hexdigest()
+    assert source_hash["parser_name"] == "manual_text"
+    assert source_hash["parser_version"] == "v1"
+
+    event = store.find_latest_event(
+        workspace_id="ws_manual_hash_01",
+        event_name="source_hash_recorded",
+    )
+    assert event is not None
+    assert event["status"] == "completed"
+    assert event["refs"]["source_id"] == source["source_id"]
 
 
 def test_source_import_service_auto_detects_url_mode(monkeypatch, tmp_path) -> None:
@@ -135,6 +181,7 @@ def test_source_import_service_persists_structured_pdf_metadata(
                     "start": 0,
                     "end": 33,
                     "text": "First claim. Supporting evidence.",
+                    "raw_text": "First claim.\nSupporting evidence.",
                 }
             ],
         },
@@ -151,11 +198,145 @@ def test_source_import_service_persists_structured_pdf_metadata(
         request_id="req_pdf_01",
     )
 
+    artifacts = store.list_source_artifacts(
+        workspace_id="ws_pdf_01",
+        source_id=str(source["source_id"]),
+    )
+    event = store.find_latest_event(
+        workspace_id="ws_pdf_01",
+        event_name="source_artifacts_recorded",
+    )
     parser_metadata = source["metadata"]["parser_metadata"]
     assert parser_metadata["parser"] == "pymupdf"
     assert parser_metadata["pages"] == 1
     assert parser_metadata["blocks"][0]["anchor_id"] == "p1-b0"
+    assert parser_metadata["blocks"][0]["raw_text"] == "First claim.\nSupporting evidence."
     assert source["content"] == "First claim. Supporting evidence."
+    assert len(artifacts) == 1
+    assert artifacts[0]["artifact_id"] == f"art_{source['source_id']}_p1-b0"
+    assert artifacts[0]["anchor_id"] == "p1-b0"
+    assert artifacts[0]["page"] == 1
+    assert artifacts[0]["block_id"] == "p1-b0"
+    assert artifacts[0]["paragraph_id"] == "p1-b0-par0"
+    assert artifacts[0]["locator"]["start"] == 0
+    assert artifacts[0]["locator"]["end"] == 33
+    assert artifacts[0]["locator"]["block_index"] == 0
+    assert artifacts[0]["locator"]["paragraph_ids"] == ["p1-b0-par0"]
+    assert artifacts[0]["metadata"]["parser"] == "pymupdf"
+    assert artifacts[0]["metadata"]["raw_text"] == "First claim.\nSupporting evidence."
+    assert event is not None
+    assert event["status"] == "completed"
+    assert event["refs"]["artifacts_count"] == 1
+
+
+def test_source_import_service_persists_one_artifact_per_structured_pdf_block(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    service = SourceImportService(store)
+
+    monkeypatch.setattr(service, "_load_local_file_bytes", lambda _payload: b"%PDF")
+    monkeypatch.setattr(
+        service,
+        "_extract_pdf_document",
+        lambda _raw: {
+            "parser": "pymupdf",
+            "pages": 2,
+            "chars": 47,
+            "text": "First block. Second block.",
+            "blocks": [
+                {
+                    "anchor_id": "p1-b0",
+                    "page_number": 1,
+                    "block_index": 0,
+                    "paragraph_ids": ["p1-b0-par0"],
+                    "start": 0,
+                    "end": 12,
+                    "text": "First block.",
+                    "raw_text": "First block.",
+                },
+                {
+                    "page_number": 2,
+                    "block_index": 3,
+                    "paragraph_ids": ["p2-b3-par0", "p2-b3-par1"],
+                    "start": 13,
+                    "end": 26,
+                    "text": "Second block.",
+                    "raw_text": "Second block.",
+                },
+            ],
+        },
+    )
+
+    source = service.import_source(
+        workspace_id="ws_pdf_blocks_01",
+        source_type="paper",
+        title=None,
+        content=None,
+        metadata={},
+        source_input_mode="local_file",
+        local_file={"file_name": "sample.pdf", "local_path": "C:/tmp/sample.pdf"},
+        request_id="req_pdf_blocks_01",
+    )
+
+    artifacts = store.list_source_artifacts(
+        workspace_id="ws_pdf_blocks_01",
+        source_id=str(source["source_id"]),
+    )
+
+    assert [artifact["anchor_id"] for artifact in artifacts] == ["p1-b0", "p2-b3"]
+    assert [artifact["artifact_id"] for artifact in artifacts] == [
+        f"art_{source['source_id']}_p1-b0",
+        f"art_{source['source_id']}_p2-b3",
+    ]
+    assert artifacts[0]["locator"]["paragraph_ids"] == ["p1-b0-par0"]
+    assert artifacts[1]["locator"]["paragraph_ids"] == ["p2-b3-par0", "p2-b3-par1"]
+    assert artifacts[1]["page"] == 2
+    assert artifacts[1]["block_id"] == "p2-b3"
+    assert artifacts[1]["paragraph_id"] == "p2-b3-par0"
+
+
+def test_source_import_service_rolls_back_source_and_artifacts_on_hash_failure(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    service = SourceImportService(store)
+
+    def _raise(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("forced source hash failure")
+
+    monkeypatch.setattr(store, "create_source_hash", _raise)
+
+    with pytest.raises(SourceImportError) as exc_info:
+        service.import_source(
+            workspace_id="ws_import_txn_01",
+            source_type="paper",
+            title="Transactional Import",
+            content="Claim: source import persists atomically.",
+            metadata={},
+            source_input_mode="manual_text",
+            request_id="req_import_txn_01",
+        )
+
+    assert exc_info.value.error_code == "research.source_hash_persistence_failed"
+
+    with sqlite3.connect(store.db_path) as conn:
+        source_count = conn.execute(
+            "SELECT COUNT(*) FROM sources WHERE workspace_id = ?",
+            ("ws_import_txn_01",),
+        ).fetchone()[0]
+        artifact_count = conn.execute(
+            "SELECT COUNT(*) FROM source_artifacts WHERE workspace_id = ?",
+            ("ws_import_txn_01",),
+        ).fetchone()[0]
+        hash_count = conn.execute(
+            "SELECT COUNT(*) FROM source_hashes WHERE workspace_id = ?",
+            ("ws_import_txn_01",),
+        ).fetchone()[0]
+
+    assert source_count == 0
+    assert artifact_count == 0
+    assert hash_count == 0
 
 
 def test_source_import_service_local_file_does_not_promote_body_doi(tmp_path) -> None:

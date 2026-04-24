@@ -10,6 +10,7 @@ from research_layer.api.controllers._state_store import ResearchApiStateStore
 from research_layer.extractors import EvidenceExtractor
 from research_layer.services.llm_gateway import ResearchLLMError
 from research_layer.services.llm_trace import LLMCallResult
+from research_layer.services.source_parser import SourceParser
 from research_layer.services.source_import_service import SourceImportService
 from research_layer.workers.extraction_worker import ExtractionWorker
 
@@ -58,12 +59,149 @@ def _build_minimal_docx_bytes(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def test_extraction_worker_resolves_pdf_whitespace_span(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content=(
+            "H2:社会主流向善一致性中介于文化认知与品牌态度 \n"
+            "之间,有积极的影响。数据显示,95.6% 属于积极品牌态度的范畴。"
+        ),
+        metadata={},
+    )
+
+    start, end, text = worker._resolve_source_span(
+        parsed=parsed,
+        primary_query="H2:社会主流向善一致性中介于文化认知与品牌态度之间,有积极的影响。",
+        secondary_query=None,
+    )
+
+    assert start >= 0
+    assert end > start
+    assert "品牌态度" in text
+
+
+def test_extraction_worker_builds_traceable_source_artifacts(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content="变量\t均值\t标准差\n品牌态度\t4.23\t0.86\n差序格局\t3.91\t0.72",
+        metadata={
+            "parser_metadata": {
+                "blocks": [
+                    {
+                        "anchor_id": "p1-b0",
+                        "page_number": 1,
+                        "block_index": 0,
+                        "paragraph_ids": ["p1-b0-par0"],
+                        "start": 0,
+                        "end": 42,
+                        "text": "变量\t均值\t标准差\n品牌态度\t4.23\t0.86\n差序格局\t3.91\t0.72",
+                    }
+                ]
+            }
+        },
+    )
+
+    artifacts = worker._build_source_artifacts(
+        workspace_id="ws_artifact", source_id="src_paper", parsed=parsed
+    )
+
+    assert len(artifacts) == 1
+    assert artifacts[0]["artifact_id"] == "art_src_paper_p1-b0"
+    assert artifacts[0]["artifact_type"] == "table"
+    assert artifacts[0]["locator"]["page"] == 1
+    assert artifacts[0]["locator"]["block_id"] == "p1-b0"
+    assert artifacts[0]["content"] == "变量\t均值\t标准差\n品牌态度\t4.23\t0.86\n差序格局\t3.91\t0.72"
+    assert artifacts[0]["metadata"]["structure"]["headers"] == ["变量", "均值", "标准差"]
+    assert artifacts[0]["metadata"]["structure"]["row_count"] == 2
+    assert artifacts[0]["metadata"]["structure"]["rows"][0]["mapping"]["变量"] == "品牌态度"
+
+
+def test_extraction_worker_classifies_figure_formula_and_code_artifacts(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    assert worker._classify_source_artifact("Figure 2. Accuracy comparison across models") == "figure"
+    assert worker._classify_source_artifact("x_{t+1}=x_t-η∇L(x_t)") == "formula"
+    assert (
+        worker._classify_source_artifact("def train():\n    return loss\nfor step in range(10):")
+        == "code"
+    )
+
+
+def test_extraction_worker_builds_chunk_artifact_profile(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    profile = worker._build_chunk_artifact_profile(
+        parsed=SourceParser().parse(
+            source_type="paper",
+            content="Figure 2. Accuracy rises. Background text.",
+            metadata={
+                "parser_metadata": {
+                    "blocks": [
+                        {
+                            "anchor_id": "p1-b0",
+                            "page_number": 1,
+                            "block_index": 0,
+                            "paragraph_ids": ["p1-b0-par0"],
+                            "start": 0,
+                            "end": 25,
+                            "text": "Figure 2. Accuracy rises.",
+                            "raw_text": "Figure 2. Accuracy rises.",
+                        },
+                        {
+                            "anchor_id": "p1-b1",
+                            "page_number": 1,
+                            "block_index": 1,
+                            "paragraph_ids": ["p1-b1-par0"],
+                            "start": 26,
+                            "end": 42,
+                            "text": "Background text.",
+                            "raw_text": "Background text.",
+                        },
+                    ]
+                }
+            },
+        ),
+        chunk=type(
+            "ChunkStub",
+            (),
+            {"start": 0, "end": 42, "section_hint": "full"},
+        )(),
+        anchor_refs=[
+            {"artifact_type": "figure"},
+            {"artifact_type": "figure"},
+            {"artifact_type": "text"},
+        ],
+    )
+
+    assert profile["dominant_artifact_type"] == "figure"
+    assert profile["extraction_focus"] == "figure"
+    assert profile["artifact_counts"] == {"figure": 2, "text": 1}
+    assert profile["artifacts"][0]["structure"]["label"] == "Figure 2."
+
+
+def test_extraction_worker_handles_ragged_table_rows(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    structure = worker._extract_table_structure(
+        "变量\t均值\n品牌态度\t4.23\t0.86\n差序格局\t3.91"
+    )
+
+    assert structure["column_count"] == 3
+    assert structure["headers"] == ["变量", "均值", "col_3"]
+    assert structure["rows"][0]["mapping"]["col_3"] == "0.86"
+    assert structure["rows"][1]["mapping"]["col_3"] == ""
+
+
 @pytest.mark.asyncio
 async def test_extraction_worker_limits_prompt_window_and_output_tokens(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_MAX_INPUT_CHARS", "200")
     monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_MAX_INPUT_SEGMENTS", "3")
+    monkeypatch.setenv("RESEARCH_SOURCE_CHUNK_MAX_CHARS", "200")
+    monkeypatch.setenv("RESEARCH_SOURCE_CHUNK_MAX_SEGMENTS", "3")
     monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_MAX_OUTPUT_TOKENS", "77")
 
     store = _build_store(tmp_path)
@@ -94,8 +232,34 @@ async def test_extraction_worker_limits_prompt_window_and_output_tokens(
     captured: dict[str, object] = {}
 
     class _FakeGateway:
+        async def invoke_text(self, **kwargs: object) -> LLMCallResult:
+            prompt_name = str(kwargs.get("prompt_name") or "")
+            raw_text = (
+                '{"document_summary":"short memo","domain_profile":["test"],'
+                '"structure_hints":{"concepts":[],"claims_or_hypotheses":[],'
+                '"methods_or_measurements":[],"results_or_evidence":[],'
+                '"conditions_or_limits":[],"relation_cues":[]}}'
+            )
+            if prompt_name == "argument_unit_extraction" and not captured:
+                captured.update(kwargs)
+            if prompt_name == "argument_unit_extraction":
+                raw_text = '{"units":[]}'
+            if prompt_name.startswith("argument_relation"):
+                raw_text = '{"relations":[]}'
+            return LLMCallResult(
+                provider_backend="unit_test_backend",
+                provider_model="unit_test_model",
+                request_id=str(kwargs["request_id"]),
+                llm_response_id="resp_slice3_extract_limit_text",
+                usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+                raw_text=raw_text,
+                parsed_json=None,
+                fallback_used=False,
+                degraded=False,
+                degraded_reason=None,
+            )
+
         async def invoke_json(self, **kwargs: object) -> LLMCallResult:
-            captured.update(kwargs)
             return LLMCallResult(
                 provider_backend="unit_test_backend",
                 provider_model="unit_test_model",
@@ -129,6 +293,14 @@ async def test_extraction_worker_limits_prompt_window_and_output_tokens(
 
 
 class _InvalidJsonGateway:
+    async def invoke_text(self, **kwargs: object) -> LLMCallResult:
+        raise ResearchLLMError(
+            status_code=502,
+            error_code="research.llm_invalid_output",
+            message="invalid extraction JSON",
+            details={"provider_message": "not-json"},
+        )
+
     async def invoke_json(self, **kwargs: object) -> LLMCallResult:
         raise ResearchLLMError(
             status_code=502,

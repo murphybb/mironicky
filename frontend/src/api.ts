@@ -92,6 +92,7 @@ export interface CandidateRecord {
   source_id: string;
   candidate_batch_id?: string;
   candidate_type: string;
+  semantic_type?: string | null;
   text: string;
   status: 'pending' | 'confirmed' | 'rejected' | string;
   source_span?: {
@@ -373,6 +374,7 @@ function normalizeCandidate(candidate: any): CandidateRecord {
     source_id: String(candidate?.source_id ?? ''),
     candidate_batch_id: String(candidate?.candidate_batch_id ?? ''),
     candidate_type: String(candidate?.candidate_type ?? ''),
+    semantic_type: candidate?.semantic_type == null ? null : String(candidate.semantic_type),
     text: String(candidate?.text ?? ''),
     status: String(candidate?.status ?? 'pending'),
     source_span: normalizedSourceSpan,

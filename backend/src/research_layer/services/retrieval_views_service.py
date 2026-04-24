@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
 from research_layer.api.schemas.retrieval import RETRIEVAL_VIEW_VALUES, RETRIEVE_METHOD_VALUES
+from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _AUTHORITY_TIER_ORDER = {
@@ -138,6 +139,13 @@ class RetrievalContext:
             return None
         source_id = obj.get("source_id")
         return str(source_id) if source_id else None
+
+    def claim_id_for_formal_ref(self, object_type: str, object_id: str) -> str | None:
+        obj = self.confirmed_by_ref.get((object_type, object_id))
+        if obj is None:
+            return None
+        claim_id = obj.get("claim_id")
+        return str(claim_id) if claim_id else None
 
     def source_id_for_node_ref(self, node_id: str) -> str | None:
         node = self._store.get_graph_node(node_id)
@@ -515,6 +523,7 @@ class HypothesisSupportRetrieverService(RetrievalViewServiceBase):
 class ResearchRetrievalService:
     def __init__(self, store: ResearchApiStateStore) -> None:
         self._store = store
+        self._memory_recall_service = EverMemOSRecallService(store)
         self._view_services: dict[str, RetrievalViewServiceBase] = {
             "evidence": EvidenceRetrieverService(),
             "contradiction": ContradictionRetrieverService(),
@@ -636,6 +645,20 @@ class ResearchRetrievalService:
                 )
                 for document, score in ranked
             ]
+            scope_claim_ids = self._scope_claim_ids_for_docs(
+                docs=[document for document, _score in ranked],
+                context=context,
+            )
+            memory_recall = self._memory_recall_service.recall(
+                workspace_id=workspace_id,
+                query_text=query,
+                requested_method=method,
+                scope_claim_ids=scope_claim_ids,
+                scope_mode="prefer",
+                top_k=min(top_k, 8),
+                request_id=request_id,
+                trace_refs={"context_type": "retrieval_view", "view_type": view},
+            )
             response = {
                 "view_type": view,
                 "workspace_id": workspace_id,
@@ -644,6 +667,7 @@ class ResearchRetrievalService:
                 "metadata_filter_refs": metadata_filter_refs,
                 "total": len(response_items),
                 "items": response_items,
+                "memory_recall": memory_recall,
             }
             self._store.emit_event(
                 event_name="retrieval_view_completed",
@@ -684,6 +708,29 @@ class ResearchRetrievalService:
                 },
             )
             raise
+
+    def _scope_claim_ids_for_docs(
+        self,
+        *,
+        docs: list[RetrievalDocument],
+        context: RetrievalContext,
+    ) -> list[str]:
+        claim_ids: list[str] = []
+        seen: set[str] = set()
+        for doc in docs:
+            for formal_ref in doc.formal_refs:
+                if not isinstance(formal_ref, dict):
+                    continue
+                object_type = str(formal_ref.get("object_type", "")).strip()
+                object_id = str(formal_ref.get("object_id", "")).strip()
+                if not object_type or not object_id:
+                    continue
+                claim_id = context.claim_id_for_formal_ref(object_type, object_id)
+                if not claim_id or claim_id in seen:
+                    continue
+                seen.add(claim_id)
+                claim_ids.append(claim_id)
+        return claim_ids
 
     def resolve_memory_item(
         self, *, workspace_id: str, view_type: str, result_id: str

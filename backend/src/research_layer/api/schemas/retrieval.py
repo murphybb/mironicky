@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from research_layer.api.schemas.common import WorkspaceScopedBody
+from research_layer.api.schemas.memory import MemoryRecallResponse
 from research_layer.api.schemas.scholarly import (
     AuthoritySummaryResponse,
     EvidenceRefResponse,
@@ -53,3 +54,4 @@ class RetrievalViewResponse(BaseModel):
     metadata_filter_refs: dict[str, object] = Field(default_factory=dict)
     total: int
     items: list[RetrievalResultItem] = Field(default_factory=list)
+    memory_recall: MemoryRecallResponse | None = None

@@ -54,6 +54,7 @@ from research_layer.graph.repository import GraphRepository
 from research_layer.services.graph_build_service import GraphBuildService
 from research_layer.services.graph_query_service import GraphQueryService
 from research_layer.services.graph_report_service import GraphReportService
+from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
 from research_layer.services.research_export_service import ResearchExportService
 
 
@@ -68,6 +69,86 @@ class ResearchGraphController(BaseController):
         self._query_service = GraphQueryService(self._repository)
         self._report_service = GraphReportService(STORE)
         self._export_service = ResearchExportService(STORE)
+        self._memory_recall_service = EverMemOSRecallService(STORE)
+
+    def _graph_memory_recall_for_full_graph(self, *, workspace_id: str) -> dict[str, object]:
+        return self._memory_recall_service.skipped(
+            workspace_id=workspace_id,
+            requested_method="logical",
+            reason="graph_recall_requires_center_node",
+            request_id=f"graph::{workspace_id}::full",
+        )
+
+    def _graph_query_text(self, *, node: dict[str, object]) -> str:
+        parts: list[str] = []
+        claim_id = str(node.get("claim_id") or "").strip()
+        if claim_id:
+            claim = STORE.get_claim(claim_id)
+            if claim is not None:
+                claim_text = str(claim.get("text") or "").strip()
+                if claim_text:
+                    parts.append(claim_text)
+        for field in ("short_label", "full_description"):
+            value = str(node.get(field) or "").strip()
+            if value and value not in parts:
+                parts.append(value)
+        return " ".join(parts[:3]).strip()
+
+    def _graph_memory_recall_for_center_node(
+        self,
+        *,
+        workspace_id: str,
+        center_node_id: str,
+        queried_nodes: list[dict[str, object]],
+        request_id: str,
+    ) -> dict[str, object]:
+        node = next(
+            (
+                item
+                for item in queried_nodes
+                if str(item.get("node_id") or "").strip() == center_node_id
+            ),
+            None,
+        )
+        if node is None:
+            return self._memory_recall_service.failed(
+                workspace_id=workspace_id,
+                requested_method="logical",
+                reason="graph_center_node_not_visible_in_workspace",
+                query_text=None,
+                request_id=request_id,
+                trace_refs={"center_node_id": center_node_id},
+            )
+        claim_id = str(node.get("claim_id") or "").strip()
+        if not claim_id:
+            return self._memory_recall_service.failed(
+                workspace_id=workspace_id,
+                requested_method="logical",
+                reason="graph_center_node_missing_claim_scope",
+                query_text=None,
+                request_id=request_id,
+                trace_refs={"center_node_id": center_node_id},
+            )
+        query_text = self._graph_query_text(node=node)
+        if not query_text:
+            return self._memory_recall_service.failed(
+                workspace_id=workspace_id,
+                requested_method="logical",
+                reason="graph_center_node_missing_recall_query",
+                query_text=None,
+                request_id=request_id,
+                trace_refs={"center_node_id": center_node_id, "claim_id": claim_id},
+            )
+        return self._memory_recall_service.recall(
+            workspace_id=workspace_id,
+            query_text=query_text,
+            requested_method="logical",
+            scope_claim_ids=[claim_id],
+            scope_mode="require",
+            top_k=8,
+            request_id=request_id,
+            trace_refs={"center_node_id": center_node_id},
+        )
 
     def _create_archive_version(
         self,
@@ -165,7 +246,14 @@ class ResearchGraphController(BaseController):
         )
         nodes = [GraphNodeResponse.model_validate(node) for node in result["nodes"]]
         edges = [GraphEdgeResponse.model_validate(edge) for edge in result["edges"]]
-        return GraphResponse(workspace_id=workspace, nodes=nodes, edges=edges)
+        return GraphResponse(
+            workspace_id=workspace,
+            nodes=nodes,
+            edges=edges,
+            memory_recall=self._graph_memory_recall_for_full_graph(
+                workspace_id=workspace
+            ),
+        )
 
     @get(
         "/graph/{workspace_id}/report",
@@ -418,7 +506,17 @@ class ResearchGraphController(BaseController):
         )
         nodes = [GraphNodeResponse.model_validate(node) for node in result["nodes"]]
         edges = [GraphEdgeResponse.model_validate(edge) for edge in result["edges"]]
-        return GraphResponse(workspace_id=workspace, nodes=nodes, edges=edges)
+        return GraphResponse(
+            workspace_id=workspace,
+            nodes=nodes,
+            edges=edges,
+            memory_recall=self._graph_memory_recall_for_center_node(
+                workspace_id=workspace,
+                center_node_id=str(payload.center_node_id),
+                queried_nodes=result["nodes"],
+                request_id=request_id,
+            ),
+        )
 
     @get(
         "/graph/{workspace_id}/workspace",

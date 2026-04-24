@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from research_layer.api.schemas.common import WorkspaceScopedBody
+from research_layer.api.schemas.memory import MemoryRecallResponse
 
 
 class FactorBreakdownRecord(BaseModel):
@@ -110,6 +111,7 @@ class RouteRecord(BaseModel):
     key_risks: list[dict[str, object]] = Field(default_factory=list)
     open_questions: list[dict[str, object]] = Field(default_factory=list)
     rank: int | None = None
+    memory_recall: MemoryRecallResponse | None = None
 
 
 class RouteListResponse(BaseModel):
@@ -140,6 +142,7 @@ class RoutePreviewResponse(BaseModel):
     next_validation_action: str
     top_factors: list[FactorBreakdownRecord] = Field(default_factory=list)
     trace_refs: RouteTraceRefs = Field(default_factory=RouteTraceRefs)
+    memory_recall: MemoryRecallResponse | None = None
 
 
 class RouteRecomputeRequest(WorkspaceScopedBody):

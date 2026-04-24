@@ -201,6 +201,36 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS source_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                anchor_id TEXT NOT NULL,
+                page INTEGER,
+                block_id TEXT,
+                paragraph_id TEXT,
+                section_path_json TEXT NOT NULL DEFAULT '[]',
+                caption TEXT,
+                content TEXT NOT NULL,
+                locator_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS source_hashes (
+                source_hash_id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT NOT NULL,
+                raw_sha256 TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                parser_name TEXT NOT NULL,
+                parser_version TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS candidates (
                 candidate_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -282,6 +312,26 @@ class ResearchApiStateStore:
                 short_tags_json TEXT NOT NULL DEFAULT '[]',
                 visibility TEXT NOT NULL DEFAULT 'workspace',
                 source_refs_json TEXT NOT NULL DEFAULT '[]',
+                claim_id TEXT,
+                source_ref_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS claims (
+                claim_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                candidate_id TEXT NOT NULL UNIQUE,
+                claim_type TEXT NOT NULL,
+                semantic_type TEXT,
+                text TEXT NOT NULL,
+                normalized_text TEXT NOT NULL,
+                quote TEXT,
+                source_span_json TEXT NOT NULL,
+                trace_refs_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -408,7 +458,23 @@ class ResearchApiStateStore:
                 object_ref_type TEXT NOT NULL,
                 object_ref_id TEXT NOT NULL,
                 strength REAL NOT NULL,
+                claim_id TEXT,
+                source_ref_json TEXT NOT NULL DEFAULT '{}',
                 status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS claim_memory_links (
+                link_id TEXT PRIMARY KEY,
+                claim_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT NOT NULL,
+                memory_id TEXT,
+                sync_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                last_error_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -946,10 +1012,24 @@ class ResearchApiStateStore:
                 )
                 self._ensure_column(conn, "graph_nodes", "created_at", "TEXT")
                 self._ensure_column(conn, "graph_nodes", "updated_at", "TEXT")
+                self._ensure_column(conn, "graph_nodes", "claim_id", "TEXT")
+                self._ensure_column(
+                    conn,
+                    "graph_nodes",
+                    "source_ref_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
                 self._ensure_column(conn, "graph_edges", "object_ref_type", "TEXT")
                 self._ensure_column(conn, "graph_edges", "object_ref_id", "TEXT")
                 self._ensure_column(conn, "graph_edges", "created_at", "TEXT")
                 self._ensure_column(conn, "graph_edges", "updated_at", "TEXT")
+                self._ensure_column(conn, "graph_edges", "claim_id", "TEXT")
+                self._ensure_column(
+                    conn,
+                    "graph_edges",
+                    "source_ref_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
                 for table_name in (
                     "research_evidences",
                     "research_assumptions",
@@ -1081,9 +1161,12 @@ class ResearchApiStateStore:
     def reset_all(self) -> None:
         tables = [
             "sources",
+            "source_artifacts",
+            "source_hashes",
             "candidates",
             "extraction_results",
             "routes",
+            "claims",
             "research_evidences",
             "research_assumptions",
             "research_conclusions",
@@ -1096,6 +1179,7 @@ class ResearchApiStateStore:
             "relation_candidates",
             "graph_nodes",
             "graph_edges",
+            "claim_memory_links",
             "graph_versions",
             "graph_workspaces",
             "failures",
@@ -1138,6 +1222,7 @@ class ResearchApiStateStore:
         content: str,
         metadata: dict[str, object],
         import_request_id: str | None,
+        conn: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
         resolved_source_id = source_id or self.gen_id("src")
         now = self.now()
@@ -1163,8 +1248,9 @@ class ResearchApiStateStore:
                 self._to_iso(now),
                 self._to_iso(now),
             ),
+            conn=conn,
         )
-        return self.get_source(resolved_source_id)
+        return self.get_source(resolved_source_id, conn=conn)
 
     def get_source(
         self, source_id: str, *, conn: sqlite3.Connection | None = None
@@ -1203,6 +1289,7 @@ class ResearchApiStateStore:
                 conn=conn,
             )
         latest_error = self._loads(latest_result["error_json"]) if latest_result is not None else None
+        source_hash = self.get_source_hash_for_source(source_id, conn=conn)
         return {
             "source_id": row["source_id"],
             "workspace_id": row["workspace_id"],
@@ -1217,6 +1304,7 @@ class ResearchApiStateStore:
             "last_candidate_batch_id": latest_result["candidate_batch_id"] if latest_result is not None else None,
             "last_extract_status": latest_result["status"] if latest_result is not None else None,
             "last_extract_error": latest_error if isinstance(latest_error, dict) else None,
+            "source_hash": source_hash,
             "created_at": self._from_iso(row["created_at"]),
             "updated_at": self._from_iso(row["updated_at"]),
         }
@@ -1237,6 +1325,161 @@ class ResearchApiStateStore:
             if source is not None:
                 items.append(source)
         return items
+
+    def create_source_hash(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        raw_sha256: str,
+        content_sha256: str,
+        parser_name: str,
+        parser_version: str | None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        source_hash_id = self.gen_id("srchash")
+        created_at = self._to_iso(self.now())
+        self._execute(
+            """
+            INSERT INTO source_hashes (
+                source_hash_id, source_id, workspace_id, raw_sha256, content_sha256,
+                parser_name, parser_version, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_hash_id,
+                source_id,
+                workspace_id,
+                raw_sha256,
+                content_sha256,
+                parser_name,
+                parser_version,
+                created_at,
+            ),
+            conn=conn,
+        )
+        record = self.get_source_hash_for_source(source_id, conn=conn)
+        assert record is not None
+        return record
+
+    def get_source_hash_for_source(
+        self, source_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM source_hashes WHERE source_id = ? LIMIT 1",
+            (source_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return {
+            "source_hash_id": row["source_hash_id"],
+            "source_id": row["source_id"],
+            "workspace_id": row["workspace_id"],
+            "raw_sha256": row["raw_sha256"],
+            "content_sha256": row["content_sha256"],
+            "parser_name": row["parser_name"],
+            "parser_version": row["parser_version"],
+            "created_at": self._from_iso(row["created_at"]),
+        }
+
+    def replace_source_artifacts(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        artifacts: list[dict[str, object]],
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        self._execute(
+            "DELETE FROM source_artifacts WHERE workspace_id = ? AND source_id = ?",
+            (workspace_id, source_id),
+            conn=conn,
+        )
+        created: list[dict[str, object]] = []
+        now = self._to_iso(self.now())
+        for artifact in artifacts:
+            artifact_id = str(artifact.get("artifact_id") or self.gen_id("art"))
+            self._execute(
+                """
+                INSERT INTO source_artifacts (
+                    artifact_id, workspace_id, source_id, artifact_type, anchor_id,
+                    page, block_id, paragraph_id, section_path_json, caption, content,
+                    locator_json, metadata_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    workspace_id,
+                    source_id,
+                    str(artifact.get("artifact_type") or "text"),
+                    str(artifact.get("anchor_id") or artifact_id),
+                    artifact.get("page"),
+                    artifact.get("block_id"),
+                    artifact.get("paragraph_id"),
+                    self._dumps(artifact.get("section_path") or []),
+                    artifact.get("caption"),
+                    str(artifact.get("content") or ""),
+                    self._dumps(artifact.get("locator") or {}),
+                    self._dumps(artifact.get("metadata") or {}),
+                    now,
+                ),
+                conn=conn,
+            )
+            loaded = self.get_source_artifact(artifact_id, conn=conn)
+            if loaded is not None:
+                created.append(loaded)
+        return created
+
+    def get_source_artifact(
+        self, artifact_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM source_artifacts WHERE artifact_id = ?",
+            (artifact_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return self._row_to_source_artifact(row)
+
+    def list_source_artifacts(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
+        sql = "SELECT * FROM source_artifacts WHERE workspace_id = ?"
+        params: list[object] = [workspace_id]
+        if source_id is not None:
+            sql += " AND source_id = ?"
+            params.append(source_id)
+        sql += " ORDER BY page ASC, anchor_id ASC, artifact_id ASC"
+        return [
+            self._row_to_source_artifact(row)
+            for row in self._fetchall(sql, tuple(params), conn=conn)
+        ]
+
+    def _row_to_source_artifact(self, row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "artifact_id": row["artifact_id"],
+            "workspace_id": row["workspace_id"],
+            "source_id": row["source_id"],
+            "artifact_type": row["artifact_type"],
+            "anchor_id": row["anchor_id"],
+            "page": row["page"],
+            "block_id": row["block_id"],
+            "paragraph_id": row["paragraph_id"],
+            "section_path": self._loads(row["section_path_json"]) or [],
+            "caption": row["caption"],
+            "content": row["content"],
+            "locator": self._loads_dict(row["locator_json"]),
+            "metadata": self._loads_dict(row["metadata_json"]),
+            "created_at": self._from_iso(row["created_at"]),
+        }
 
     def list_workspaces(self) -> list[dict[str, object]]:
         rows = self._fetchall(
@@ -1949,6 +2192,274 @@ class ResearchApiStateStore:
             conn=conn,
         )
 
+    def create_claim(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        candidate_id: str,
+        claim_type: str,
+        semantic_type: str | None,
+        text: str,
+        normalized_text: str,
+        quote: str | None,
+        source_span: dict[str, object],
+        trace_refs: dict[str, object],
+        status: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        claim_id = self.gen_id("claim")
+        now = self._to_iso(self.now())
+        self._execute(
+            """
+            INSERT INTO claims (
+                claim_id, workspace_id, source_id, candidate_id, claim_type, semantic_type,
+                text, normalized_text, quote, source_span_json, trace_refs_json, status,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                claim_id,
+                workspace_id,
+                source_id,
+                candidate_id,
+                claim_type,
+                semantic_type,
+                text,
+                normalized_text,
+                quote,
+                self._dumps(source_span),
+                self._dumps(trace_refs),
+                status,
+                now,
+                now,
+            ),
+            conn=conn,
+        )
+        claim = self.get_claim(claim_id, conn=conn)
+        assert claim is not None
+        return claim
+
+    def create_claim_from_candidate(
+        self,
+        *,
+        candidate: dict[str, object],
+        normalized_text: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        return self.create_claim(
+            workspace_id=str(candidate["workspace_id"]),
+            source_id=str(candidate["source_id"]),
+            candidate_id=str(candidate["candidate_id"]),
+            claim_type=str(candidate["candidate_type"]),
+            semantic_type=(
+                str(candidate["semantic_type"])
+                if candidate.get("semantic_type") is not None
+                else None
+            ),
+            text=str(candidate["text"]),
+            normalized_text=normalized_text,
+            quote=(
+                str(candidate["quote"])
+                if candidate.get("quote") is not None
+                else None
+            ),
+            source_span=(
+                dict(candidate["source_span"])
+                if isinstance(candidate.get("source_span"), dict)
+                else {}
+            ),
+            trace_refs=(
+                dict(candidate["trace_refs"])
+                if isinstance(candidate.get("trace_refs"), dict)
+                else {}
+            ),
+            status="confirmed",
+            conn=conn,
+        )
+
+    def get_claim(
+        self, claim_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM claims WHERE claim_id = ?",
+            (claim_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        memory_link = self.get_claim_memory_link(claim_id=claim_id, conn=conn)
+        return {
+            "claim_id": row["claim_id"],
+            "workspace_id": row["workspace_id"],
+            "source_id": row["source_id"],
+            "candidate_id": row["candidate_id"],
+            "claim_type": row["claim_type"],
+            "semantic_type": row["semantic_type"],
+            "text": row["text"],
+            "normalized_text": row["normalized_text"],
+            "quote": row["quote"],
+            "source_span": self._loads(row["source_span_json"]) or {},
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
+            "status": row["status"],
+            "memory_link": memory_link,
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
+        }
+
+    def get_claim_by_candidate_id(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            """
+            SELECT claim_id
+            FROM claims
+            WHERE workspace_id = ? AND candidate_id = ?
+            LIMIT 1
+            """,
+            (workspace_id, candidate_id),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return self.get_claim(str(row["claim_id"]), conn=conn)
+
+    def list_claims(
+        self, workspace_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            """
+            SELECT claim_id
+            FROM claims
+            WHERE workspace_id = ?
+            ORDER BY created_at ASC, claim_id ASC
+            """,
+            (workspace_id,),
+            conn=conn,
+        )
+        claims: list[dict[str, object]] = []
+        for row in rows:
+            claim = self.get_claim(str(row["claim_id"]), conn=conn)
+            if claim is not None:
+                claims.append(claim)
+        return claims
+
+    def upsert_claim_memory_link(
+        self,
+        *,
+        claim_id: str,
+        workspace_id: str,
+        memory_id: str | None,
+        sync_mode: str,
+        status: str,
+        reason: str | None = None,
+        last_error: dict[str, object] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        existing = self.get_claim_memory_link(claim_id=claim_id, conn=conn)
+        now = self._to_iso(self.now())
+        if existing is None:
+            link_id = self.gen_id("clmem")
+            self._execute(
+                """
+                INSERT INTO claim_memory_links (
+                    link_id, claim_id, workspace_id, memory_id, sync_mode, status, reason,
+                    last_error_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link_id,
+                    claim_id,
+                    workspace_id,
+                    memory_id,
+                    sync_mode,
+                    status,
+                    reason,
+                    self._dumps(last_error) if last_error is not None else None,
+                    now,
+                    now,
+                ),
+                conn=conn,
+            )
+        else:
+            self._execute(
+                """
+                UPDATE claim_memory_links
+                SET memory_id = ?,
+                    sync_mode = ?,
+                    status = ?,
+                    reason = ?,
+                    last_error_json = ?,
+                    updated_at = ?
+                WHERE claim_id = ?
+                """,
+                (
+                    memory_id,
+                    sync_mode,
+                    status,
+                    reason,
+                    self._dumps(last_error) if last_error is not None else None,
+                    now,
+                    claim_id,
+                ),
+                conn=conn,
+            )
+        record = self.get_claim_memory_link(claim_id=claim_id, conn=conn)
+        assert record is not None
+        return record
+
+    def get_claim_memory_link(
+        self,
+        *,
+        claim_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM claim_memory_links WHERE claim_id = ? LIMIT 1",
+            (claim_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return {
+            "link_id": row["link_id"],
+            "claim_id": row["claim_id"],
+            "workspace_id": row["workspace_id"],
+            "memory_id": row["memory_id"],
+            "sync_mode": row["sync_mode"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "last_error": self._loads_dict(row["last_error_json"]),
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
+        }
+
+    def list_claim_memory_links(
+        self, workspace_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            """
+            SELECT claim_id
+            FROM claim_memory_links
+            WHERE workspace_id = ?
+            ORDER BY created_at ASC, claim_id ASC
+            """,
+            (workspace_id,),
+            conn=conn,
+        )
+        results: list[dict[str, object]] = []
+        for row in rows:
+            item = self.get_claim_memory_link(claim_id=str(row["claim_id"]), conn=conn)
+            if item is not None:
+                results.append(item)
+        return results
+
     def find_confirmed_object_by_normalized_text(
         self,
         *,
@@ -2583,6 +3094,9 @@ class ResearchApiStateStore:
             ("failure", "research_failures", "failure_id"),
             ("validation", "research_validations", "validation_id"),
         ]
+        claims_by_candidate: dict[str, dict[str, object]] = {}
+        for claim in self.list_claims(workspace_id, conn=conn):
+            claims_by_candidate[str(claim["candidate_id"])] = claim
         objects: list[dict[str, object]] = []
         for object_type, table_name, id_col in table_specs:
             rows = self._fetchall(
@@ -2599,17 +3113,25 @@ class ResearchApiStateStore:
             objects.extend(
                 [
                     {
-                        "object_type": object_type,
-                        "object_id": row["object_id"],
-                        "candidate_id": row["candidate_id"],
-                        "workspace_id": workspace_id,
-                        "source_id": row["source_id"],
-                        "text": row["text"],
-                        "source_span": self._loads(row["source_span_json"]) or {},
-                        "semantic_type": row["semantic_type"],
-                        "quote": row["quote"],
-                        "trace_refs": self._loads_dict(row["trace_refs_json"]),
-                        "created_at": row["created_at"],
+                        **{
+                            "object_type": object_type,
+                            "object_id": row["object_id"],
+                            "candidate_id": row["candidate_id"],
+                            "workspace_id": workspace_id,
+                            "source_id": row["source_id"],
+                            "text": row["text"],
+                            "source_span": self._loads(row["source_span_json"]) or {},
+                            "semantic_type": row["semantic_type"],
+                            "quote": row["quote"],
+                            "trace_refs": self._loads_dict(row["trace_refs_json"]),
+                            "created_at": row["created_at"],
+                        },
+                        "claim_id": (
+                            claims_by_candidate.get(str(row["candidate_id"]), {}).get("claim_id")
+                        ),
+                        "claim_status": (
+                            claims_by_candidate.get(str(row["candidate_id"]), {}).get("status")
+                        ),
                     }
                     for row in rows
                 ]
@@ -2881,6 +3403,8 @@ class ResearchApiStateStore:
         short_tags: list[str] | None = None,
         visibility: str = "workspace",
         source_refs: list[dict[str, object]] | None = None,
+        claim_id: str | None = None,
+        source_ref: dict[str, object] | None = None,
         status: str = "active",
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
@@ -2898,14 +3422,19 @@ class ResearchApiStateStore:
         for raw_ref in source_refs or []:
             if isinstance(raw_ref, dict):
                 normalized_source_refs.append(dict(raw_ref))
+        normalized_source_ref = (
+            dict(source_ref)
+            if isinstance(source_ref, dict)
+            else {}
+        )
         self._execute(
             """
             INSERT INTO graph_nodes (
                 node_id, workspace_id, node_type, object_ref_type, object_ref_id,
                 short_label, full_description, short_tags_json, visibility, source_refs_json,
-                status, created_at, updated_at
+                claim_id, source_ref_json, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node_id,
@@ -2918,6 +3447,8 @@ class ResearchApiStateStore:
                 self._dumps(normalized_short_tags),
                 visibility,
                 self._dumps(normalized_source_refs),
+                claim_id,
+                self._dumps(normalized_source_ref),
                 status,
                 now,
                 now,
@@ -2947,6 +3478,8 @@ class ResearchApiStateStore:
             "short_tags": self._loads(row["short_tags_json"]) or [],
             "visibility": row["visibility"] or "workspace",
             "source_refs": self._loads(row["source_refs_json"]) or [],
+            "claim_id": row["claim_id"],
+            "source_ref": self._loads_dict(row["source_ref_json"]),
             "status": row["status"],
             "created_at": self._from_iso(row["created_at"]),
             "updated_at": self._from_iso(row["updated_at"]),
@@ -3054,6 +3587,8 @@ class ResearchApiStateStore:
                 "short_tags": self._loads(row["short_tags_json"]) or [],
                 "visibility": row["visibility"] or "workspace",
                 "source_refs": self._loads(row["source_refs_json"]) or [],
+                "claim_id": row["claim_id"],
+                "source_ref": self._loads_dict(row["source_ref_json"]),
                 "status": row["status"],
                 "created_at": self._from_iso(row["created_at"]),
                 "updated_at": self._from_iso(row["updated_at"]),
@@ -3071,18 +3606,26 @@ class ResearchApiStateStore:
         object_ref_type: str,
         object_ref_id: str,
         strength: float,
+        claim_id: str | None = None,
+        source_ref: dict[str, object] | None = None,
         status: str = "active",
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
         edge_id = self.gen_id("edge")
         now = self._to_iso(self.now())
+        normalized_source_ref = (
+            dict(source_ref)
+            if isinstance(source_ref, dict)
+            else {}
+        )
         self._execute(
             """
             INSERT INTO graph_edges (
                 edge_id, workspace_id, source_node_id, target_node_id, edge_type,
-                object_ref_type, object_ref_id, strength, status, created_at, updated_at
+                object_ref_type, object_ref_id, strength, claim_id, source_ref_json,
+                status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 edge_id,
@@ -3093,6 +3636,8 @@ class ResearchApiStateStore:
                 object_ref_type,
                 object_ref_id,
                 strength,
+                claim_id,
+                self._dumps(normalized_source_ref),
                 status,
                 now,
                 now,
@@ -3120,6 +3665,8 @@ class ResearchApiStateStore:
             "object_ref_type": row["object_ref_type"],
             "object_ref_id": row["object_ref_id"],
             "strength": row["strength"],
+            "claim_id": row["claim_id"],
+            "source_ref": self._loads_dict(row["source_ref_json"]),
             "status": row["status"],
             "created_at": self._from_iso(row["created_at"]),
             "updated_at": self._from_iso(row["updated_at"]),
@@ -3164,6 +3711,8 @@ class ResearchApiStateStore:
                 "object_ref_type": row["object_ref_type"],
                 "object_ref_id": row["object_ref_id"],
                 "strength": row["strength"],
+                "claim_id": row["claim_id"],
+                "source_ref": self._loads_dict(row["source_ref_json"]),
                 "status": row["status"],
                 "created_at": self._from_iso(row["created_at"]),
                 "updated_at": self._from_iso(row["updated_at"]),

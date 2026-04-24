@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from research_layer.api.schemas.common import WorkspaceScopedBody
+from research_layer.api.schemas.memory import MemoryRecallResponse
 
 
 class GraphNodeCreateRequest(WorkspaceScopedBody):
@@ -38,6 +39,8 @@ class GraphNodeResponse(BaseModel):
     short_tags: list[str] = Field(default_factory=list)
     visibility: str = "workspace"
     source_refs: list[dict[str, object]] = Field(default_factory=list)
+    claim_id: str | None = None
+    source_ref: dict[str, object] = Field(default_factory=dict)
     status: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -70,6 +73,8 @@ class GraphEdgeResponse(BaseModel):
     object_ref_type: str
     object_ref_id: str
     strength: float
+    claim_id: str | None = None
+    source_ref: dict[str, object] = Field(default_factory=dict)
     status: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -79,6 +84,7 @@ class GraphResponse(BaseModel):
     workspace_id: str
     nodes: list[GraphNodeResponse]
     edges: list[GraphEdgeResponse]
+    memory_recall: MemoryRecallResponse | None = None
 
 
 class GraphBuildResponse(BaseModel):

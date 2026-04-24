@@ -55,6 +55,26 @@ function candidateTypeLabel(type: string) {
   return type || '候选';
 }
 
+function semanticTypeLabel(type: string) {
+  const normalized = String(type || '').toLowerCase();
+  const map: Record<string, string> = {
+    concept: '概念',
+    entity: '实体',
+    claim: '主张',
+    hypothesis: '研究假设',
+    evidence: '证据',
+    method: '方法',
+    result: '结果',
+    finding: '发现',
+    definition: '定义',
+    condition: '条件',
+    limitation: '局限',
+    citation: '引用',
+    question: '问题',
+  };
+  return map[normalized] || type;
+}
+
 function factorLabel(name: string) {
   const normalized = String(name || '').trim();
   const map: Record<string, string> = {
@@ -1571,13 +1591,15 @@ export function ConfirmPage({ candidates, extractionContext, fetchData, goto, sh
           const normalizedType = String(c.candidate_type || '').toLowerCase();
           const color = normalizedType === 'evidence' ? '#3B6D11' : normalizedType === 'assumption' ? '#BA7517' : normalizedType === 'failure' ? '#A32D2D' : '#888780';
           const typeLbl = candidateTypeLabel(normalizedType);
+          const semanticLbl = semanticTypeLabel(String(c.semantic_type || ''));
+          const typeText = semanticLbl ? `${typeLbl} · ${semanticLbl}` : typeLbl;
 
           return (
             <div key={c.candidate_id} className={`cand-card ${c.status === 'confirmed' ? 'acc' : c.status === 'rejected' ? 'rej' : ''}`} id={`cc-${c.candidate_id}`}>
               <div className="cand-hdr">
                 <div className="cand-type-dot" style={{ background: color }}></div>
                 <div className="cand-main">
-                  <div className="cand-type">{typeLbl}</div>
+                  <div className="cand-type">{typeText}</div>
                   <div className="cand-label">{c.text}</div>
                   <div className="cand-desc">{c.source_span?.desc}</div>
                 </div>

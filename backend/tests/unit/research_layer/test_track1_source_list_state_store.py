@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from research_layer.api.controllers._state_store import ResearchApiStateStore
 
 
@@ -97,3 +99,61 @@ def test_state_store_list_workspaces_summarizes_non_empty_workspaces(tmp_path) -
     assert by_id["ws_has_graph"]["updated_at"] is not None
     assert by_id["ws_has_source"]["source_count"] == 1
     assert str(source_b["workspace_id"]) in by_id
+
+
+def test_state_store_persists_source_hashes_claims_and_memory_links(tmp_path) -> None:
+    store = ResearchApiStateStore(db_path=str(tmp_path / "research_traceability.sqlite3"))
+    source = store.create_source(
+        workspace_id="ws_trace_store",
+        source_type="paper",
+        title="Trace Source",
+        content="Claim: traceability is explicit.",
+        metadata={},
+        import_request_id="req_trace_store",
+    )
+    source_hash = store.create_source_hash(
+        source_id=str(source["source_id"]),
+        workspace_id="ws_trace_store",
+        raw_sha256=hashlib.sha256(b"raw payload").hexdigest(),
+        content_sha256=hashlib.sha256(
+            b"Claim: traceability is explicit."
+        ).hexdigest(),
+        parser_name="manual_text",
+        parser_version="v1",
+    )
+    claim = store.create_claim(
+        workspace_id="ws_trace_store",
+        source_id=str(source["source_id"]),
+        candidate_id="cand_trace_store",
+        claim_type="evidence",
+        semantic_type="result",
+        text="Claim: traceability is explicit.",
+        normalized_text="claim: traceability is explicit.",
+        quote="Claim: traceability is explicit.",
+        source_span={"start": 0, "end": 31},
+        trace_refs={"source_anchor_id": "p1-b0"},
+        status="active",
+    )
+    memory_link = store.upsert_claim_memory_link(
+        claim_id=str(claim["claim_id"]),
+        workspace_id="ws_trace_store",
+        memory_id=None,
+        sync_mode="best_effort_record",
+        status="skipped",
+        reason="bridge_not_configured",
+        last_error=None,
+    )
+
+    reloaded_source = store.get_source(str(source["source_id"]))
+    reloaded_claim = store.get_claim(str(claim["claim_id"]))
+    claim_lookup = store.get_claim_by_candidate_id(
+        workspace_id="ws_trace_store",
+        candidate_id="cand_trace_store",
+    )
+
+    assert reloaded_source is not None
+    assert reloaded_source["source_hash"] == source_hash
+    assert reloaded_claim is not None
+    assert reloaded_claim["memory_link"] == memory_link
+    assert claim_lookup is not None
+    assert claim_lookup["claim_id"] == claim["claim_id"]

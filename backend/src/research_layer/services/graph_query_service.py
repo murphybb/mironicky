@@ -4,10 +4,32 @@ from collections import deque
 
 from research_layer.graph.repository import GraphRepository
 
+_HIDDEN_GRAPH_STATUSES = {"archived", "superseded"}
+
 
 class GraphQueryService:
     def __init__(self, repository: GraphRepository) -> None:
         self._repository = repository
+
+    def _visible_nodes(
+        self, nodes: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        return [
+            node
+            for node in nodes
+            if str(node.get("status", "")) not in _HIDDEN_GRAPH_STATUSES
+        ]
+
+    def _visible_edges(
+        self, *, edges: list[dict[str, object]], node_ids: set[str]
+    ) -> list[dict[str, object]]:
+        return [
+            edge
+            for edge in edges
+            if str(edge.get("status", "")) not in _HIDDEN_GRAPH_STATUSES
+            and str(edge.get("source_node_id", "")) in node_ids
+            and str(edge.get("target_node_id", "")) in node_ids
+        ]
 
     def _collect_edges_for_nodes(
         self, *, edges: list[dict[str, object]], node_ids: set[str]
@@ -238,8 +260,12 @@ class GraphQueryService:
         center_node_id: str | None,
         max_hops: int,
     ) -> dict[str, list[dict[str, object]]]:
-        nodes = self._repository.list_nodes(workspace_id=workspace_id)
-        edges = self._repository.list_edges(workspace_id=workspace_id)
+        nodes = self._visible_nodes(self._repository.list_nodes(workspace_id=workspace_id))
+        node_ids = {str(node.get("node_id", "")) for node in nodes}
+        edges = self._visible_edges(
+            edges=self._repository.list_edges(workspace_id=workspace_id),
+            node_ids=node_ids,
+        )
         if center_node_id is None:
             return {"nodes": nodes, "edges": edges}
 
@@ -265,8 +291,12 @@ class GraphQueryService:
         edge_type_sequence: list[str],
         max_paths: int = 64,
     ) -> dict[str, object]:
-        nodes = self._repository.list_nodes(workspace_id=workspace_id)
-        edges = self._repository.list_edges(workspace_id=workspace_id)
+        nodes = self._visible_nodes(self._repository.list_nodes(workspace_id=workspace_id))
+        node_ids = {str(node.get("node_id", "")) for node in nodes}
+        edges = self._visible_edges(
+            edges=self._repository.list_edges(workspace_id=workspace_id),
+            node_ids=node_ids,
+        )
         node_map = {str(node.get("node_id", "")): node for node in nodes}
         normalized_edge_types = self._normalize_edge_type_sequence(edge_type_sequence)
         normalized_start_ids = sorted(
@@ -342,7 +372,10 @@ class GraphQueryService:
         )
         path_evidence = list(metapath_result.get("path_evidence", []))
         existing_pairs: set[tuple[str, str]] = set()
-        for edge in self._repository.list_edges(workspace_id=workspace_id):
+        for edge in self._visible_edges(
+            edges=self._repository.list_edges(workspace_id=workspace_id),
+            node_ids=set(node_map.keys()),
+        ):
             if str(edge.get("edge_type", "")).strip() != normalized_predicted_edge_type:
                 continue
             source = str(edge.get("source_node_id", "")).strip()
@@ -427,8 +460,12 @@ class GraphQueryService:
         edge_type_sequence: list[str] | None = None,
         path_limit: int = 32,
     ) -> dict[str, object]:
-        nodes = self._repository.list_nodes(workspace_id=workspace_id)
-        edges = self._repository.list_edges(workspace_id=workspace_id)
+        nodes = self._visible_nodes(self._repository.list_nodes(workspace_id=workspace_id))
+        node_ids = {str(node.get("node_id", "")) for node in nodes}
+        edges = self._visible_edges(
+            edges=self._repository.list_edges(workspace_id=workspace_id),
+            node_ids=node_ids,
+        )
         node_map = {str(node["node_id"]): node for node in nodes}
         normalized_edge_types = self._normalize_edge_type_sequence(edge_type_sequence)
 

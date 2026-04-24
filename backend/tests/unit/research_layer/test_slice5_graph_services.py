@@ -46,14 +46,26 @@ def _seed_confirmed_evidence_and_assumption(
         candidates=[
             {
                 "candidate_type": "evidence",
+                "semantic_type": "result",
                 "text": "Claim: retrieval improves accuracy.",
                 "source_span": {"start": 0, "end": 30},
+                "quote": "Claim: retrieval improves accuracy.",
+                "trace_refs": {
+                    "source_artifact_id": "art_src_seed_p1-b0",
+                    "source_anchor_id": "p1-b0",
+                },
                 "extractor_name": "evidence_extractor",
             },
             {
                 "candidate_type": "assumption",
+                "semantic_type": "hypothesis",
                 "text": "Assumption: embeddings remain stable.",
                 "source_span": {"start": 31, "end": 68},
+                "quote": "Assumption: embeddings remain stable.",
+                "trace_refs": {
+                    "source_artifact_id": "art_src_seed_p1-b1",
+                    "source_anchor_id": "p1-b1",
+                },
                 "extractor_name": "assumption_extractor",
             },
         ],
@@ -85,15 +97,45 @@ def test_build_graph_maps_confirmed_objects_with_traceable_backlinks(tmp_path) -
 
     nodes = repo.list_nodes(workspace_id=workspace_id)
     edges = repo.list_edges(workspace_id=workspace_id)
+    active_nodes = [node for node in nodes if node["status"] == "active"]
+    active_edges = [edge for edge in edges if edge["status"] == "active"]
     assert version["version_id"]
     assert len(nodes) >= 2
     assert len(edges) >= 1
+    assert active_nodes
+    assert active_edges
     assert {node["object_ref_type"] for node in nodes}.issuperset(
         {"evidence", "assumption"}
     )
     assert all(node["object_ref_id"] for node in nodes)
+    assert all(node["claim_id"] for node in active_nodes)
+    assert all(node["source_ref"]["source_id"] for node in active_nodes)
+    assert {tuple(node["short_tags"]) for node in nodes}.issuperset(
+        {("result",), ("hypothesis",)}
+    )
+    source_spans = [
+        ref.get("source_span")
+        for node in nodes
+        for ref in node.get("source_refs", [])
+    ]
+    assert {"start": 0, "end": 30} in source_spans
+    assert {"start": 31, "end": 68} in source_spans
+    source_quotes = [
+        ref.get("quote") for node in nodes for ref in node.get("source_refs", [])
+    ]
+    assert "Claim: retrieval improves accuracy." in source_quotes
+    assert "Assumption: embeddings remain stable." in source_quotes
+    artifact_ids = [
+        ref.get("artifact_id")
+        for node in nodes
+        for ref in node.get("source_refs", [])
+    ]
+    assert "art_src_seed_p1-b0" in artifact_ids
+    assert "art_src_seed_p1-b1" in artifact_ids
     assert all(edge["object_ref_type"] for edge in edges)
     assert all(edge["object_ref_id"] for edge in edges)
+    assert all(edge["claim_id"] for edge in active_edges)
+    assert all(edge["source_ref"]["source_id"] for edge in active_edges)
 
 
 def test_query_returns_local_subgraph_and_update_changes_query_result(tmp_path) -> None:
@@ -106,7 +148,11 @@ def test_query_returns_local_subgraph_and_update_changes_query_result(tmp_path) 
         workspace_id=workspace_id, request_id="req_slice5_build_query"
     )
     query_service = GraphQueryService(repo)
-    all_nodes = repo.list_nodes(workspace_id=workspace_id)
+    all_nodes = [
+        node
+        for node in repo.list_nodes(workspace_id=workspace_id)
+        if node["status"] != "superseded"
+    ]
     assert all_nodes
     center_node_id = all_nodes[0]["node_id"]
 
@@ -131,6 +177,45 @@ def test_query_returns_local_subgraph_and_update_changes_query_result(tmp_path) 
     )
     assert updated_center["short_label"] == "Updated Label"
     assert updated_center["status"] == "weakened"
+
+
+def test_query_hides_superseded_graph_objects_after_rebuild(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    workspace_id = "ws_slice5_hide_superseded"
+    repo = GraphRepository(store)
+    old_node = repo.create_node(
+        workspace_id=workspace_id,
+        node_type="evidence",
+        object_ref_type="evidence",
+        object_ref_id="evi_old",
+        short_label="Old evidence",
+        full_description="Old evidence",
+    )
+    repo.create_edge(
+        workspace_id=workspace_id,
+        source_node_id=str(old_node["node_id"]),
+        target_node_id=str(old_node["node_id"]),
+        edge_type="derives",
+        object_ref_type="evidence",
+        object_ref_id="evi_old",
+        strength=0.5,
+    )
+    repo.reset_workspace_graph(workspace_id)
+    active_node = repo.create_node(
+        workspace_id=workspace_id,
+        node_type="evidence",
+        object_ref_type="evidence",
+        object_ref_id="evi_new",
+        short_label="New evidence",
+        full_description="New evidence",
+    )
+
+    result = GraphQueryService(repo).query_subgraph(
+        workspace_id=workspace_id, center_node_id=None, max_hops=1
+    )
+
+    assert [node["node_id"] for node in result["nodes"]] == [active_node["node_id"]]
+    assert result["edges"] == []
 
 
 def test_invalid_node_or_edge_updates_raise_explicit_errors(tmp_path) -> None:
@@ -330,3 +415,78 @@ def test_build_graph_uses_resolved_relation_candidates_and_skips_unresolved(tmp_
     ]
     assert [edge["edge_type"] for edge in active_edges] == ["supports"]
     assert active_edges[0]["object_ref_type"] == "relation_candidate"
+    assert active_edges[0]["claim_id"]
+    assert active_edges[0]["source_ref"]["source_id"] == str(source["source_id"])
+
+
+def test_build_graph_skips_confirmed_objects_without_claim_traceability(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    workspace_id = "ws_slice5_gate"
+    source = store.create_source(
+        workspace_id=workspace_id,
+        source_type="paper",
+        title="gate source",
+        content="Claim: legacy confirmed object lacks claim ledger.",
+        metadata={},
+        import_request_id="req_slice5_gate_seed",
+    )
+    job = store.create_job(
+        job_type="source_extract",
+        workspace_id=workspace_id,
+        request_id="req_slice5_gate_seed",
+    )
+    batch = store.create_candidate_batch(
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        request_id="req_slice5_gate_seed",
+    )
+    created = store.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=str(source["source_id"]),
+        job_id=str(job["job_id"]),
+        candidates=[
+            {
+                "candidate_type": "evidence",
+                "semantic_type": "result",
+                "text": "Claim: legacy confirmed object lacks claim ledger.",
+                "source_span": {"start": 0, "end": 48},
+                "quote": "Claim: legacy confirmed object lacks claim ledger.",
+                "trace_refs": {"source_anchor_id": "p1-b0"},
+                "extractor_name": "argument_unit_extractor",
+            }
+        ],
+    )
+    candidate = created[0]
+    store.create_confirmed_object_from_candidate(
+        candidate=candidate,
+        normalized_text="claim: legacy confirmed object lacks claim ledger.",
+        request_id="req_slice5_gate_confirmed",
+    )
+    store.update_candidate_status(
+        candidate_id=str(candidate["candidate_id"]),
+        status="confirmed",
+    )
+
+    repo = GraphRepository(store)
+    version = GraphBuildService(repo).build_workspace_graph(
+        workspace_id=workspace_id,
+        request_id="req_slice5_gate_build",
+    )
+    latest_version = store.get_graph_version(str(version["version_id"]))
+    skipped_event = store.find_latest_event(
+        workspace_id=workspace_id,
+        event_name="graph_projection_skipped",
+        ref_key="reason",
+        ref_value="missing_claim_or_source_ref",
+    )
+
+    assert version["node_count"] == 0
+    assert version["edge_count"] == 0
+    assert latest_version is not None
+    assert (
+        latest_version["diff_payload"]["skipped_missing_traceability_count"] == 1
+    )
+    assert skipped_event is not None
+    assert skipped_event["status"] == "skipped"

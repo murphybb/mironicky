@@ -1652,7 +1652,14 @@ class ResearchSourceController(BaseController):
         failed_event_count = sum(
             1 for event in events if str(event.get("status", "")) == "failed"
         ) + sum(1 for job in jobs if str(job.get("status", "")) == "failed")
-        if failed_event_count > 0 and completed_event_count == 0:
+        running_job_count = sum(
+            1
+            for job in jobs
+            if str(job.get("status", "")).strip().lower() in {"queued", "running"}
+        )
+        if running_job_count > 0 and failed_event_count == 0:
+            status = "running"
+        elif failed_event_count > 0 and completed_event_count == 0:
             status = "failed"
         elif failed_event_count > 0 and completed_event_count > 0:
             status = "partial"

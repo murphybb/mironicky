@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-_CONCLUSION_NODE_TYPES = {"evidence", "assumption", "validation", "branch", "gap"}
+_PRIMARY_ROUTE_NODE_TYPES = {"assumption", "conclusion", "validation", "branch", "gap"}
 _RISK_NODE_TYPES = {"conflict", "failure"}
 _INACTIVE_STATUSES = {"archived", "superseded"}
 
@@ -20,6 +20,20 @@ class RouteCandidateBuilder:
         if max_candidates <= 0:
             return []
 
+        graph_nodes = [
+            node
+            for node in graph_nodes
+            if str(node.get("status", "")) not in _INACTIVE_STATUSES
+        ]
+        active_node_ids = {str(node.get("node_id", "")) for node in graph_nodes}
+        graph_edges = [
+            edge
+            for edge in graph_edges
+            if str(edge.get("status", "")) not in _INACTIVE_STATUSES
+            and str(edge.get("source_node_id", "")) in active_node_ids
+            and str(edge.get("target_node_id", "")) in active_node_ids
+        ]
+
         node_map = {str(node["node_id"]): node for node in graph_nodes}
         adjacency = self._build_adjacency(graph_edges)
         edge_ids_by_node_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -33,7 +47,7 @@ class RouteCandidateBuilder:
         conclusion_nodes = [
             node
             for node in graph_nodes
-            if str(node.get("node_type", "")) in _CONCLUSION_NODE_TYPES
+            if str(node.get("node_type", "")) in _PRIMARY_ROUTE_NODE_TYPES
             and str(node.get("status", "")) not in _INACTIVE_STATUSES
         ]
         if not conclusion_nodes:
@@ -55,7 +69,7 @@ class RouteCandidateBuilder:
         for conclusion_node in sorted(
             conclusion_nodes,
             key=lambda item: (
-                str(item.get("node_type", "")),
+                self._route_priority(item),
                 str(item.get("node_id", "")),
             ),
         ):
@@ -136,6 +150,21 @@ class RouteCandidateBuilder:
                 break
 
         return candidates
+
+    def _route_priority(self, node: dict[str, object]) -> int:
+        node_type = str(node.get("node_type", ""))
+        tags = {str(tag) for tag in node.get("short_tags", []) if str(tag).strip()}
+        if node_type == "assumption" and "hypothesis" in tags:
+            return 0
+        if node_type == "conclusion":
+            return 1
+        if node_type == "gap":
+            return 2
+        if node_type == "validation":
+            return 3
+        if node_type == "assumption":
+            return 4
+        return 5
 
     def _collect_route_node_ids(
         self, *, conclusion_node_id: str, adjacency: dict[str, set[str]]

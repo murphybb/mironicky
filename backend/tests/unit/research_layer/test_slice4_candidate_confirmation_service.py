@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import urllib.error
 
 import pytest
 
@@ -51,6 +53,11 @@ def _seed_pending_candidate(
                 "candidate_type": "evidence",
                 "text": source_text,
                 "source_span": {"start": 0, "end": max(1, len(source_text))},
+                "quote": source_text,
+                "trace_refs": {
+                    "source_artifact_id": "art_src_seed_p1-b0",
+                    "source_anchor_id": "p1-b0",
+                },
                 "extractor_name": "evidence_extractor",
             }
         ],
@@ -58,7 +65,34 @@ def _seed_pending_candidate(
     return candidates[0]
 
 
-def test_confirm_promotes_pending_candidate_and_persists_traceability(tmp_path) -> None:
+def test_confirm_promotes_pending_candidate_and_persists_traceability(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.delenv("RESEARCH_EVERMEMOS_BRIDGE_URL", raising=False)
+
+    async def _fake_convert(_message_data):  # type: ignore[no-untyped-def]
+        return {"memorize_request": "local-claim"}
+
+    class _FakeMemoryRequestLogService:
+        async def save_request_logs(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return ["msg_claim_local_01"]
+
+    class _FakeMemoryManager:
+        async def memorize(self, _memorize_request):  # type: ignore[no-untyped-def]
+            return 1
+
+    monkeypatch.setattr(
+        "research_layer.services.evermemos_bridge_service.convert_simple_message_to_memorize_request",
+        _fake_convert,
+    )
+    monkeypatch.setattr(
+        "research_layer.services.evermemos_bridge_service.ResearchMemoryBridge._get_memory_request_log_service",
+        lambda self: _FakeMemoryRequestLogService(),
+    )
+    monkeypatch.setattr(
+        "research_layer.services.evermemos_bridge_service.ResearchMemoryBridge._get_memory_manager",
+        lambda self: _FakeMemoryManager(),
+    )
     store = _build_store(tmp_path)
     service = CandidateConfirmationService(store)
     candidate = _seed_pending_candidate(
@@ -74,12 +108,25 @@ def test_confirm_promotes_pending_candidate_and_persists_traceability(tmp_path) 
     )
 
     assert result["candidate_status"] == "confirmed"
+    assert result["claim_id"]
+    assert result["claim_memory_sync_status"] == "written_unaddressable"
     assert result["formal_object_type"] == "evidence"
     assert result["formal_object_id"]
 
     reloaded = store.get_candidate(str(candidate["candidate_id"]))
+    claim = store.get_claim_by_candidate_id(
+        workspace_id="ws_slice4_unit",
+        candidate_id=str(candidate["candidate_id"]),
+    )
     assert reloaded is not None
     assert reloaded["status"] == "confirmed"
+    assert claim is not None
+    assert claim["claim_id"] == result["claim_id"]
+    assert claim["status"] == "confirmed"
+    assert claim["memory_link"] is not None
+    assert claim["memory_link"]["status"] == "written_unaddressable"
+    assert claim["memory_link"]["sync_mode"] == "local_memory_manager"
+    assert claim["memory_link"]["memory_id"] is None
     assert result["graph_node_id"]
     assert result["graph_version_id"]
     assert isinstance(result["graph_edge_ids"], list)
@@ -95,7 +142,7 @@ def test_confirm_promotes_pending_candidate_and_persists_traceability(tmp_path) 
         ).fetchone()
         graph_node_row = conn.execute(
             """
-            SELECT node_id, object_ref_type, object_ref_id, status
+            SELECT node_id, object_ref_type, object_ref_id, claim_id, source_ref_json, status, source_refs_json
             FROM graph_nodes
             WHERE node_id = ?
             """,
@@ -104,7 +151,16 @@ def test_confirm_promotes_pending_candidate_and_persists_traceability(tmp_path) 
         assert graph_node_row is not None
         assert graph_node_row[1] == result["formal_object_type"]
         assert graph_node_row[2] == result["formal_object_id"]
-        assert graph_node_row[3] == "active"
+        assert graph_node_row[3] == result["claim_id"]
+        source_ref = json.loads(graph_node_row[4])
+        assert source_ref["source_id"] == str(candidate["source_id"])
+        assert source_ref["claim_id"] == result["claim_id"]
+        assert graph_node_row[5] == "active"
+        source_refs = json.loads(graph_node_row[6])
+        assert source_refs[0]["quote"] == "Claim: retrieval improves accuracy."
+        assert source_refs[0]["artifact_id"] == "art_src_seed_p1-b0"
+        assert source_refs[0]["anchor_id"] == "p1-b0"
+        assert source_refs[0]["claim_id"] == result["claim_id"]
 
         version_row = conn.execute(
             """
@@ -133,6 +189,59 @@ def test_confirm_promotes_pending_candidate_and_persists_traceability(tmp_path) 
     assert row[3] == str(candidate["extraction_job_id"])
     assert workspace_row is not None
     assert workspace_row[0] == result["graph_version_id"]
+    event = store.find_latest_event(
+        workspace_id="ws_slice4_unit",
+        event_name="claim_memory_bridge_completed",
+        ref_key="claim_id",
+        ref_value=result["claim_id"],
+    )
+    assert event is not None
+    assert event["refs"]["message_log_ref"] == "message_log:msg_claim_local_01"
+
+
+def test_confirm_bridge_failure_records_failed_status_without_blocking(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RESEARCH_EVERMEMOS_BRIDGE_URL", "https://bridge.example/sync")
+    monkeypatch.setattr(
+        "research_layer.services.evermemos_bridge_service.urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            urllib.error.URLError("bridge offline")
+        ),
+    )
+    store = _build_store(tmp_path)
+    service = CandidateConfirmationService(store)
+    candidate = _seed_pending_candidate(
+        store=store,
+        workspace_id="ws_slice4_bridge_fail",
+        source_text="Claim: bridge failures stay non-blocking.",
+    )
+
+    result = service.confirm(
+        workspace_id="ws_slice4_bridge_fail",
+        candidate_id=str(candidate["candidate_id"]),
+        request_id="req_bridge_fail_01",
+    )
+
+    claim = store.get_claim_by_candidate_id(
+        workspace_id="ws_slice4_bridge_fail",
+        candidate_id=str(candidate["candidate_id"]),
+    )
+    event = store.find_latest_event(
+        workspace_id="ws_slice4_bridge_fail",
+        event_name="claim_memory_bridge_completed",
+        ref_key="claim_id",
+        ref_value=result["claim_id"],
+    )
+
+    assert result["candidate_status"] == "confirmed"
+    assert result["claim_memory_sync_status"] == "failed"
+    assert claim is not None
+    assert claim["memory_link"] is not None
+    assert claim["memory_link"]["status"] == "failed"
+    assert "transport_error" in str(claim["memory_link"]["reason"])
+    assert event is not None
+    assert event["status"] == "failed"
 
 
 def test_repeat_confirm_returns_invalid_state_error(tmp_path) -> None:

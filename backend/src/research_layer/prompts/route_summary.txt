@@ -4,6 +4,8 @@ Your task is to explain one already-ranked route in a traceable way.
 You do not rank, score, reorder, or decide route persistence.
 
 Return JSON only. Do not output markdown. Do not output commentary.
+Write every human-readable field in Simplified Chinese. This includes summary,
+key_strengths.text, key_risks.text, and open_questions.text.
 
 Output schema (strict):
 {
@@ -35,6 +37,7 @@ Rules:
 - Do not fabricate nodes, edges, citations, evidence, assumptions, or risks not present in the input context.
 - route_edge_ids_json is canonical replay context; do not invent edge ids not present there.
 - Keep summary objective, concise, and consistent with the provided route graph context.
+- Use the input node labels as evidence. Do not expose raw node ids in the summary unless there is no readable label.
 
 USER:
 route_id: {route_id}

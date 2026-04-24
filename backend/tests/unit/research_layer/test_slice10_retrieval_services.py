@@ -535,3 +535,69 @@ def test_slice10_graph_query_service_supports_logical_subgraph_entrypoint(tmp_pa
     assert path["edge_type_sequence"] == ["conflicts"]
     assert "trace_refs" in path
     assert metapath_result["trace_refs"]["metapath_path_count"] >= 1
+
+
+def test_slice10_retrieval_attaches_top_level_memory_recall_with_formal_ref_scope(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    workspace_id = "ws_slice10_memory_recall"
+    _seed_confirmed_objects(store, workspace_id)
+    service = ResearchRetrievalService(store)
+    captured: dict[str, object] = {}
+
+    def _fake_recall(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "requested_method": str(kwargs["requested_method"]),
+            "applied_method": str(kwargs["requested_method"]),
+            "reason": None,
+            "query_text": str(kwargs["query_text"]),
+            "total": 1,
+            "items": [
+                {
+                    "memory_type": "event_log",
+                    "memory_id": "mem_retrieval_01",
+                    "score": 0.88,
+                    "title": "retrieval memory",
+                    "snippet": "retrieval memory snippet",
+                    "timestamp": "2026-04-24T00:00:00Z",
+                    "linked_claim_refs": [],
+                    "trace_refs": {},
+                }
+            ],
+            "trace_refs": {},
+        }
+
+    monkeypatch.setattr(service._memory_recall_service, "recall", _fake_recall)
+
+    response = service.retrieve(
+        workspace_id=workspace_id,
+        view_type="evidence",
+        query="retrieval precision",
+        retrieve_method="hybrid",
+        top_k=10,
+        metadata_filters={},
+        request_id="req_slice10_memory_recall",
+    )
+
+    claim_by_formal_ref = {
+        (str(item["object_type"]), str(item["object_id"])): str(item["claim_id"])
+        for item in store.list_confirmed_objects(workspace_id)
+        if item.get("claim_id")
+    }
+    expected_scope: list[str] = []
+    for item in response["items"]:
+        for formal_ref in item["formal_refs"]:
+            key = (str(formal_ref["object_type"]), str(formal_ref["object_id"]))
+            claim_id = claim_by_formal_ref.get(key)
+            if claim_id and claim_id not in expected_scope:
+                expected_scope.append(claim_id)
+
+    assert response["memory_recall"]["status"] == "completed"
+    assert captured["workspace_id"] == workspace_id
+    assert captured["query_text"] == "retrieval precision"
+    assert captured["requested_method"] == "hybrid"
+    assert captured["scope_mode"] == "prefer"
+    assert captured["scope_claim_ids"] == expected_scope

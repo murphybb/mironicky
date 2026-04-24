@@ -57,6 +57,8 @@ class GraphRepository:
         short_tags: list[str] | None = None,
         visibility: str = "workspace",
         source_refs: list[dict[str, object]] | None = None,
+        claim_id: str | None = None,
+        source_ref: dict[str, object] | None = None,
         status: str = "active",
     ) -> dict[str, object]:
         return self._store.create_graph_node(
@@ -69,6 +71,8 @@ class GraphRepository:
             short_tags=short_tags,
             visibility=visibility,
             source_refs=source_refs,
+            claim_id=claim_id,
+            source_ref=source_ref,
             status=status,
         )
 
@@ -139,6 +143,8 @@ class GraphRepository:
         object_ref_type: str,
         object_ref_id: str,
         strength: float,
+        claim_id: str | None = None,
+        source_ref: dict[str, object] | None = None,
         status: str = "active",
     ) -> dict[str, object]:
         return self._store.create_graph_edge(
@@ -149,6 +155,8 @@ class GraphRepository:
             object_ref_type=object_ref_type,
             object_ref_id=object_ref_id,
             strength=strength,
+            claim_id=claim_id,
+            source_ref=source_ref,
             status=status,
         )
 

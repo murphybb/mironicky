@@ -122,6 +122,119 @@ def test_slice7_candidate_builder_creates_multiple_traceable_candidates(
         assert isinstance(candidate["trace_refs"].get("route_edge_ids"), list)
 
 
+def test_slice7_candidate_builder_prefers_claim_nodes_over_evidence_titles() -> None:
+    builder = RouteCandidateBuilder()
+    candidates = builder.build_candidates(
+        workspace_id="ws_slice7_claim_priority",
+        graph_nodes=[
+            {
+                "node_id": "node_evidence",
+                "workspace_id": "ws_slice7_claim_priority",
+                "node_type": "evidence",
+                "object_ref_type": "evidence",
+                "object_ref_id": "evi_1",
+                "short_label": "Evidence node",
+                "status": "active",
+                "short_tags": ["result"],
+            },
+            {
+                "node_id": "node_claim",
+                "workspace_id": "ws_slice7_claim_priority",
+                "node_type": "assumption",
+                "object_ref_type": "assumption",
+                "object_ref_id": "asm_1",
+                "short_label": "Hypothesis node",
+                "status": "active",
+                "short_tags": ["hypothesis"],
+            },
+        ],
+        graph_edges=[
+            {
+                "edge_id": "edge_support",
+                "workspace_id": "ws_slice7_claim_priority",
+                "source_node_id": "node_evidence",
+                "target_node_id": "node_claim",
+                "edge_type": "supports",
+                "object_ref_type": "relation_candidate",
+                "object_ref_id": "rel_1",
+                "strength": 0.8,
+                "status": "active",
+            }
+        ],
+        version_id="ver_claim_priority",
+        max_candidates=8,
+    )
+
+    assert [candidate["conclusion_node_id"] for candidate in candidates] == ["node_claim"]
+
+
+def test_slice7_candidate_builder_ignores_superseded_graph_objects() -> None:
+    builder = RouteCandidateBuilder()
+    candidates = builder.build_candidates(
+        workspace_id="ws_slice7_superseded",
+        graph_nodes=[
+            {
+                "node_id": "node_old_claim",
+                "workspace_id": "ws_slice7_superseded",
+                "node_type": "assumption",
+                "object_ref_type": "assumption",
+                "object_ref_id": "asm_old",
+                "short_label": "Old claim",
+                "status": "superseded",
+            },
+            {
+                "node_id": "node_new_claim",
+                "workspace_id": "ws_slice7_superseded",
+                "node_type": "assumption",
+                "object_ref_type": "assumption",
+                "object_ref_id": "asm_new",
+                "short_label": "New claim",
+                "status": "active",
+            },
+            {
+                "node_id": "node_new_evidence",
+                "workspace_id": "ws_slice7_superseded",
+                "node_type": "evidence",
+                "object_ref_type": "evidence",
+                "object_ref_id": "evi_new",
+                "short_label": "New evidence",
+                "status": "active",
+            },
+        ],
+        graph_edges=[
+            {
+                "edge_id": "edge_old",
+                "workspace_id": "ws_slice7_superseded",
+                "source_node_id": "node_old_claim",
+                "target_node_id": "node_new_claim",
+                "edge_type": "supports",
+                "object_ref_type": "relation_candidate",
+                "object_ref_id": "rel_old",
+                "strength": 0.8,
+                "status": "superseded",
+            },
+            {
+                "edge_id": "edge_new",
+                "workspace_id": "ws_slice7_superseded",
+                "source_node_id": "node_new_evidence",
+                "target_node_id": "node_new_claim",
+                "edge_type": "supports",
+                "object_ref_type": "relation_candidate",
+                "object_ref_id": "rel_new",
+                "strength": 0.8,
+                "status": "active",
+            },
+        ],
+        version_id="ver_superseded",
+        max_candidates=8,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["conclusion_node_id"] == "node_new_claim"
+    assert set(candidates[0]["route_node_ids"]) == {"node_new_claim", "node_new_evidence"}
+    assert candidates[0]["trace_refs"]["route_edge_ids"] == ["edge_new"]
+
+
 def test_slice7_candidate_builder_uses_risk_nodes_as_last_resort() -> None:
     builder = RouteCandidateBuilder()
     candidates = builder.build_candidates(
@@ -420,7 +533,7 @@ async def test_slice7_summarizer_fallback_is_explicit(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_slice7_summarizer_rejects_unknown_node_refs(monkeypatch) -> None:
+async def test_slice7_summarizer_filters_unknown_node_refs(monkeypatch) -> None:
     summarizer = RouteSummarizer()
 
     class _FakeGateway:
@@ -474,17 +587,15 @@ async def test_slice7_summarizer_rejects_unknown_node_refs(monkeypatch) -> None:
         },
     }
 
-    from research_layer.services.llm_gateway import ResearchLLMError
+    summary, _trace = await summarizer.summarize(
+        candidate=candidate,
+        node_map=node_map,
+        top_factors=[],
+        request_id="req_slice7_unknown_refs",
+        allow_fallback=False,
+    )
 
-    with pytest.raises(ResearchLLMError) as exc:
-        await summarizer.summarize(
-            candidate=candidate,
-            node_map=node_map,
-            top_factors=[],
-            request_id="req_slice7_unknown_refs",
-            allow_fallback=False,
-        )
-    assert exc.value.error_code == "research.llm_invalid_output"
+    assert summary["key_strengths"] == [{"text": "invalid ref", "node_refs": []}]
 
 
 def test_route_edge_ids_json_is_persisted_as_canonical_source(tmp_path) -> None:
