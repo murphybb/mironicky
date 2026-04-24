@@ -895,6 +895,10 @@ export function RouteDetailPage({
                   </div>
                 ))
               )}
+              <div style={{ marginTop: '4px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--text3)', lineHeight: 1.6, marginBottom: '4px' }}>GraphRAG 历史记忆召回</div>
+                {renderMemoryRecallSection(graphAnswer.memory_recall)}
+              </div>
             </div>
           )}
 
