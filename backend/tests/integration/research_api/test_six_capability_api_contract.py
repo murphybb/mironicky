@@ -69,6 +69,25 @@ def test_six_capability_endpoints_are_feature_flagged_by_default() -> None:
     assert payload["details"]["feature_flag"] == "RESEARCH_FEATURE_QUERY_API_ENABLED"
 
 
+def test_graph_report_is_available_by_default_for_workbench_insights() -> None:
+    client = _build_client()
+
+    response = client.get("/api/v1/research/graph/ws_default_report/report")
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["node_count"] == 0
+
+
+def test_graph_report_ignores_legacy_disabled_flag_for_workbench(monkeypatch) -> None:
+    monkeypatch.setenv("RESEARCH_FEATURE_GRAPH_REPORT_ENABLED", "0")
+    client = _build_client()
+
+    response = client.get("/api/v1/research/graph/ws_legacy_disabled_report/report")
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["node_count"] == 0
+
+
 def test_bootstrap_query_report_and_export_contract(monkeypatch) -> None:
     _enable_six_flags(monkeypatch)
     client = _build_client()

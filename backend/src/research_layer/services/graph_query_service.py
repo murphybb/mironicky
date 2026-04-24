@@ -371,6 +371,8 @@ class GraphQueryService:
             max_paths=max_paths,
         )
         path_evidence = list(metapath_result.get("path_evidence", []))
+        nodes = self._visible_nodes(self._repository.list_nodes(workspace_id=workspace_id))
+        node_map = {str(node.get("node_id", "")): node for node in nodes}
         existing_pairs: set[tuple[str, str]] = set()
         for edge in self._visible_edges(
             edges=self._repository.list_edges(workspace_id=workspace_id),

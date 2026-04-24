@@ -46,7 +46,6 @@ from research_layer.api.schemas.graph import (
 from research_layer.api.schemas.export import ResearchExportResponse
 from research_layer.config.feature_flags import (
     EXPORT_FLAG,
-    GRAPH_REPORT_FLAG,
     feature_disabled_error,
     is_feature_enabled,
 )
@@ -262,21 +261,6 @@ class ResearchGraphController(BaseController):
     )
     async def get_graph_report(self, workspace_id: str, request: Request) -> GraphReportResponse:
         request_id = get_request_id(request.headers.get("x-request-id"))
-        if not is_feature_enabled(GRAPH_REPORT_FLAG):
-            error = feature_disabled_error(GRAPH_REPORT_FLAG)
-            self._repository.emit_event(
-                event_name="graph_report_completed",
-                request_id=request_id,
-                workspace_id=workspace_id,
-                step="report",
-                status="failed",
-                error={
-                    "error_code": str(error["code"]),
-                    "message": str(error["message"]),
-                    "details": dict(error.get("details", {})),
-                },
-            )
-            raise_http_error(**error)
         workspace = validate_workspace_id(workspace_id)
         try:
             report = self._report_service.build_report(workspace_id=workspace)
