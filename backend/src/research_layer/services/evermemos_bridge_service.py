@@ -105,6 +105,7 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         *,
         claim: dict[str, object],
         request_id: str,
+        context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         claim_id = str(claim["claim_id"])
         workspace_id = str(claim["workspace_id"])
@@ -131,13 +132,16 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
 
         endpoint = os.getenv("RESEARCH_EVERMEMOS_BRIDGE_URL", "").strip()
         if not endpoint:
-            return self._sync_to_local_memory(claim=claim, request_id=request_id)
+            return self._sync_to_local_memory(
+                claim=claim, request_id=request_id, context=context
+            )
 
         try:
             response = self._sync_over_http(
                 endpoint=endpoint,
                 claim=claim,
                 request_id=request_id,
+                context=context,
             )
             memory_id = str(response.get("memory_id") or "").strip()
             if not memory_id:
@@ -240,9 +244,10 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         *,
         claim: dict[str, object],
         request_id: str,
+        context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         try:
-            message_payload = self._build_local_message_payload(claim)
+            message_payload = self._build_local_message_payload(claim, context=context)
             memorize_request = self._run_awaitable_blocking(
                 lambda: convert_simple_message_to_memorize_request(message_payload)
             )
@@ -354,8 +359,9 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         endpoint: str,
         claim: dict[str, object],
         request_id: str,
+        context: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        payload = json.dumps(self._build_claim_payload(claim)).encode("utf-8")
+        payload = json.dumps(self._build_claim_payload(claim, context=context)).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "X-Request-Id": request_id,
@@ -443,7 +449,7 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         return decoded
 
     def _build_local_message_payload(
-        self, claim: dict[str, object]
+        self, claim: dict[str, object], *, context: dict[str, object] | None = None
     ) -> dict[str, object]:
         claim_id = str(claim["claim_id"])
         workspace_id = str(claim["workspace_id"])
@@ -460,7 +466,7 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             "sender": "research_layer_claim_bridge",
             "sender_name": "research_layer_claim_bridge",
             "role": "assistant",
-            "content": str(claim.get("text") or "").strip(),
+            "content": self._claim_memory_content(claim=claim, context=context),
         }
 
     def _build_source_local_message_payload(
@@ -492,7 +498,9 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             ),
         }
 
-    def _build_claim_payload(self, claim: dict[str, object]) -> dict[str, object]:
+    def _build_claim_payload(
+        self, claim: dict[str, object], *, context: dict[str, object] | None = None
+    ) -> dict[str, object]:
         return {
             "memory_kind": "claim",
             "claim_id": claim["claim_id"],
@@ -506,6 +514,7 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             "quote": claim.get("quote"),
             "source_span": claim.get("source_span", {}),
             "trace_refs": claim.get("trace_refs", {}),
+            "context": context or {},
         }
 
     def _build_source_payload(
@@ -577,6 +586,18 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             lines.append(f"Content preview: {preview}")
         return "\n".join(lines)
 
+    def _claim_memory_content(
+        self,
+        *,
+        claim: dict[str, object],
+        context: dict[str, object] | None,
+    ) -> str:
+        lines = [str(claim.get("text") or "").strip()]
+        context_dict = context if isinstance(context, dict) else {}
+        if context_dict:
+            lines.append(f"Graph context: {json.dumps(context_dict, ensure_ascii=False)}")
+        return "\n".join(line for line in lines if line)
+
     def _finalize_link(
         self,
         *,
@@ -630,7 +651,16 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         last_error: dict[str, object] | None,
         extra_refs: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        result = {
+        result = self._store.upsert_source_memory_link(
+            source_id=str(source["source_id"]),
+            workspace_id=str(source["workspace_id"]),
+            memory_id=memory_id,
+            sync_mode=sync_mode,
+            status=status,
+            reason=reason,
+            last_error=last_error,
+        )
+        result.update({
             "workspace_id": source["workspace_id"],
             "source_id": source["source_id"],
             "memory_id": memory_id,
@@ -638,7 +668,7 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             "status": status,
             "reason": reason,
             "last_error": last_error,
-        }
+        })
         self._store.emit_event(
             event_name="source_memory_bridge_completed",
             request_id=request_id,
@@ -828,7 +858,10 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 context_ref=context_ref,
             )
 
-        group_id = _build_research_claim_group_id(workspace_id)
+        group_ids = [
+            _build_research_claim_group_id(workspace_id),
+            _build_research_source_group_id(workspace_id),
+        ]
         self._store.emit_event(
             event_name="evermemos_recall_started",
             request_id=request_id,
@@ -843,6 +876,7 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 "requested_method": requested,
                 "applied_method": applied_method.value,
                 "claim_ids": normalized_claim_ids,
+                "group_ids": group_ids,
             },
             metrics={"query_length": len(query), "top_k": safe_top_k},
         )
@@ -850,24 +884,27 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
             flattened: list[dict[str, object]] = []
             per_type_count: dict[str, int] = {}
             for memory_type in _RECALL_MEMORY_TYPES:
-                response = self._run_awaitable_blocking(
-                    lambda memory_type=memory_type: self._get_memory_manager().retrieve_mem(
-                        RetrieveMemRequest(
-                            group_id=group_id,
-                            memory_types=[memory_type],
-                            top_k=safe_top_k,
-                            include_metadata=True,
-                            query=query,
-                            retrieve_method=applied_method,
+                type_count = 0
+                for group_id in group_ids:
+                    response = self._run_awaitable_blocking(
+                        lambda memory_type=memory_type, group_id=group_id: self._get_memory_manager().retrieve_mem(
+                            RetrieveMemRequest(
+                                group_id=group_id,
+                                memory_types=[memory_type],
+                                top_k=safe_top_k,
+                                include_metadata=True,
+                                query=query,
+                                retrieve_method=applied_method,
+                            )
                         )
                     )
-                )
-                items = self._flatten_retrieve_response(
-                    response=response,
-                    fallback_memory_type=memory_type.value,
-                )
-                per_type_count[memory_type.value] = len(items)
-                flattened.extend(items)
+                    items = self._flatten_retrieve_response(
+                        response=response,
+                        fallback_memory_type=memory_type.value,
+                    )
+                    type_count += len(items)
+                    flattened.extend(items)
+                per_type_count[memory_type.value] = type_count
             scoped = self._scope_items(
                 flattened,
                 normalized_claim_ids,
@@ -1098,6 +1135,9 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                     linked_claim_ids = self._extract_claim_ids(
                         memory_dict.get("ori_event_id_list")
                     )
+                    linked_source_ids = self._extract_source_ids(
+                        memory_dict.get("ori_event_id_list")
+                    )
                     flattened.append(
                         {
                             "memory_type": str(
@@ -1113,6 +1153,7 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                             "snippet": self._memory_snippet(memory_dict),
                             "timestamp": self._memory_timestamp(memory_dict),
                             "linked_claim_ids": linked_claim_ids,
+                            "linked_source_ids": linked_source_ids,
                             "trace_refs": {
                                 "group_id": str(group_id),
                                 "ori_event_id_list": memory_dict.get(
@@ -1153,6 +1194,19 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
             if claim_id:
                 claim_ids.append(claim_id)
         return sorted(set(claim_ids))
+
+    def _extract_source_ids(self, ori_event_id_list: object) -> list[str]:
+        if not isinstance(ori_event_id_list, list):
+            return []
+        source_ids = []
+        for raw_event_id in ori_event_id_list:
+            event_id = str(raw_event_id or "").strip()
+            if not event_id.startswith(_SOURCE_EVENT_PREFIX):
+                continue
+            source_id = event_id.removeprefix(_SOURCE_EVENT_PREFIX).strip()
+            if source_id:
+                source_ids.append(source_id)
+        return sorted(set(source_ids))
 
     def _memory_title(self, memory: dict[str, object]) -> str:
         for key in ("summary", "subject", "foresight", "atomic_fact", "episode"):
@@ -1220,7 +1274,10 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
         for item in items:
             memory_type = str(item.get("memory_type") or "")
             memory_id = str(item.get("memory_id") or "")
-            fallback_key = "|".join(item.get("linked_claim_ids", []))
+            fallback_key = "|".join(
+                list(item.get("linked_claim_ids", []))
+                + list(item.get("linked_source_ids", []))
+            )
             key = (memory_type, memory_id or fallback_key)
             existing = deduped.get(key)
             if existing is None or float(item.get("score") or 0.0) > float(
@@ -1263,6 +1320,10 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                     {"claim_id": claim_id}
                     for claim_id in item.get("linked_claim_ids", [])
                 ],
+                "linked_source_refs": [
+                    {"source_id": source_id}
+                    for source_id in item.get("linked_source_ids", [])
+                ],
                 "trace_refs": item.get("trace_refs", {}),
             }
             for item in items
@@ -1278,6 +1339,10 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
             "trace_refs": {
                 "workspace_id": workspace_id,
                 "group_id": _build_research_claim_group_id(workspace_id),
+                "group_ids": [
+                    _build_research_claim_group_id(workspace_id),
+                    _build_research_source_group_id(workspace_id),
+                ],
                 "claim_ids": claim_ids,
                 "context_type": context_type,
                 "context_ref": context_ref or {},

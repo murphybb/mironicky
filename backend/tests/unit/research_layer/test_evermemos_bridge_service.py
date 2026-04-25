@@ -36,7 +36,7 @@ def _build_claim() -> dict[str, object]:
     }
 
 
-def test_bridge_local_write_uses_thread_safe_async_bridge_and_marks_written_unaddressable(
+def test_bridge_local_write_uses_thread_safe_async_bridge_and_marks_addressable_ref(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.delenv("RESEARCH_EVERMEMOS_BRIDGE_URL", raising=False)
@@ -76,13 +76,13 @@ def test_bridge_local_write_uses_thread_safe_async_bridge_and_marks_written_unad
         ref_value="claim_bridge_01",
     )
 
-    assert result["status"] == "written_unaddressable"
+    assert result["status"] == "written_addressable_ref"
     assert result["sync_mode"] == "local_memory_manager"
-    assert result["memory_id"] is None
-    assert result["reason"] == "addressable_memory_id_unavailable"
+    assert result["memory_id"] == "local_memory_manager:claim:claim_bridge_01"
+    assert result["reason"] is None
     assert event is not None
-    assert event["status"] == "written_unaddressable"
-    assert event["refs"]["memory_id"] is None
+    assert event["status"] == "written_addressable_ref"
+    assert event["refs"]["memory_id"] == "local_memory_manager:claim:claim_bridge_01"
     assert event["refs"]["message_log_ref"] == "message_log:msg_bridge_local_01"
 
 
@@ -230,8 +230,11 @@ def test_recall_maps_logical_to_hybrid_and_links_claim_ids(
     assert response["trace_refs"]["context_ref"]["view_type"] == "evidence"
     assert request_log == [
         (RetrieveMethod.HYBRID, "episodic_memory", "research_claims::ws_bridge_01"),
+        (RetrieveMethod.HYBRID, "episodic_memory", "research_sources::ws_bridge_01"),
         (RetrieveMethod.HYBRID, "event_log", "research_claims::ws_bridge_01"),
+        (RetrieveMethod.HYBRID, "event_log", "research_sources::ws_bridge_01"),
         (RetrieveMethod.HYBRID, "foresight", "research_claims::ws_bridge_01"),
+        (RetrieveMethod.HYBRID, "foresight", "research_sources::ws_bridge_01"),
     ]
 
 

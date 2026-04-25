@@ -743,6 +743,11 @@ class ResearchRetrievalService:
         )
         if local_claim is not None:
             return local_claim
+        local_source = self._resolve_local_source_memory(
+            workspace_id=workspace_id, result_id=result_id
+        )
+        if local_source is not None:
+            return local_source
         context = RetrievalContext(self._store, workspace_id)
         service = self._view_services[view]
         for doc in service.collect_documents(context=context):
@@ -806,6 +811,45 @@ class ResearchRetrievalService:
                 "memory_id": raw_id,
                 "memory_origin": "local_memory_manager",
                 "claim_id": claim_id,
+            },
+            "evidence_refs": [],
+            "evidence_highlight_spans": [],
+            "mechanism_relation_highlights": [],
+            "authority_summary": {},
+        }
+
+    def _resolve_local_source_memory(
+        self, *, workspace_id: str, result_id: str
+    ) -> dict[str, object] | None:
+        prefix = "local_memory_manager:source:"
+        raw_id = str(result_id).strip()
+        if not raw_id.startswith(prefix):
+            return None
+        source_id = raw_id[len(prefix):].strip()
+        if not source_id:
+            return None
+        source = self._store.get_source(source_id)
+        if source is None or str(source["workspace_id"]) != workspace_id:
+            return None
+        source_ref = {
+            "source_id": source["source_id"],
+            "title": source.get("title"),
+            "source_type": source.get("source_type"),
+        }
+        return {
+            "result_id": raw_id,
+            "title": f"Source {source.get('title') or source_id}",
+            "snippet": str(
+                source.get("normalized_content") or source.get("content") or ""
+            )[:240],
+            "source_ref": source_ref,
+            "graph_refs": {},
+            "formal_refs": [{"object_type": "source", "object_id": source_id}],
+            "supporting_refs": {"source_id": source_id},
+            "trace_refs": {
+                "memory_id": raw_id,
+                "memory_origin": "local_memory_manager",
+                "source_id": source_id,
             },
             "evidence_refs": [],
             "evidence_highlight_spans": [],

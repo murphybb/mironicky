@@ -249,6 +249,20 @@ class ResearchApiStateStore:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS source_memory_links (
+                link_id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT NOT NULL,
+                memory_id TEXT,
+                sync_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                last_error_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS candidates (
                 candidate_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
@@ -1206,6 +1220,7 @@ class ResearchApiStateStore:
             "source_artifacts",
             "source_hashes",
             "source_memory_recall_results",
+            "source_memory_links",
             "candidates",
             "extraction_results",
             "routes",
@@ -1339,6 +1354,7 @@ class ResearchApiStateStore:
             source_id=source_id,
             conn=conn,
         )
+        memory_link = self.get_source_memory_link(source_id=source_id, conn=conn)
         return {
             "source_id": row["source_id"],
             "workspace_id": row["workspace_id"],
@@ -1355,6 +1371,7 @@ class ResearchApiStateStore:
             "last_extract_error": latest_error if isinstance(latest_error, dict) else None,
             "source_hash": source_hash,
             "memory_recall": memory_recall,
+            "memory_link": memory_link,
             "created_at": self._from_iso(row["created_at"]),
             "updated_at": self._from_iso(row["updated_at"]),
         }
@@ -1564,6 +1581,97 @@ class ResearchApiStateStore:
             ),
             "request_id": row["request_id"],
             "created_at": self._from_iso(row["created_at"]),
+        }
+
+    def upsert_source_memory_link(
+        self,
+        *,
+        source_id: str,
+        workspace_id: str,
+        memory_id: str | None,
+        sync_mode: str,
+        status: str,
+        reason: str | None = None,
+        last_error: dict[str, object] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        existing = self.get_source_memory_link(source_id=source_id, conn=conn)
+        now = self._to_iso(self.now())
+        if existing is None:
+            link_id = self.gen_id("srcmem")
+            self._execute(
+                """
+                INSERT INTO source_memory_links (
+                    link_id, source_id, workspace_id, memory_id, sync_mode, status,
+                    reason, last_error_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link_id,
+                    source_id,
+                    workspace_id,
+                    memory_id,
+                    sync_mode,
+                    status,
+                    reason,
+                    self._dumps(last_error) if last_error is not None else None,
+                    now,
+                    now,
+                ),
+                conn=conn,
+            )
+        else:
+            self._execute(
+                """
+                UPDATE source_memory_links
+                SET memory_id = ?,
+                    sync_mode = ?,
+                    status = ?,
+                    reason = ?,
+                    last_error_json = ?,
+                    updated_at = ?
+                WHERE source_id = ?
+                """,
+                (
+                    memory_id,
+                    sync_mode,
+                    status,
+                    reason,
+                    self._dumps(last_error) if last_error is not None else None,
+                    now,
+                    source_id,
+                ),
+                conn=conn,
+            )
+        record = self.get_source_memory_link(source_id=source_id, conn=conn)
+        assert record is not None
+        return record
+
+    def get_source_memory_link(
+        self,
+        *,
+        source_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM source_memory_links WHERE source_id = ? LIMIT 1",
+            (source_id,),
+            conn=conn,
+        )
+        if row is None:
+            return None
+        return {
+            "link_id": row["link_id"],
+            "source_id": row["source_id"],
+            "workspace_id": row["workspace_id"],
+            "memory_id": row["memory_id"],
+            "sync_mode": row["sync_mode"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "last_error": self._loads_dict(row["last_error_json"]),
+            "created_at": self._from_iso(row["created_at"]),
+            "updated_at": self._from_iso(row["updated_at"]),
         }
 
     def replace_source_artifacts(

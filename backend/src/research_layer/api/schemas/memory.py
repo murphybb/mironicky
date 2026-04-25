@@ -35,6 +35,10 @@ class MemoryRecallClaimRef(BaseModel):
     claim_id: str
 
 
+class MemoryRecallSourceRef(BaseModel):
+    source_id: str
+
+
 class MemoryRecallItem(BaseModel):
     memory_type: str
     memory_id: str
@@ -43,6 +47,7 @@ class MemoryRecallItem(BaseModel):
     snippet: str
     timestamp: str | None = None
     linked_claim_refs: list[MemoryRecallClaimRef] = Field(default_factory=list)
+    linked_source_refs: list[MemoryRecallSourceRef] = Field(default_factory=list)
     trace_refs: dict[str, object] = Field(default_factory=dict)
 
 

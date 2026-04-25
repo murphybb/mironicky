@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
+from api_specs.dtos.memory import RetrieveMemResponse
+from api_specs.memory_models import MemoryType
+from api_specs.memory_types import EpisodeMemory
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from research_layer.api.controllers import research_graph_controller as graph_module
+from research_layer.api.controllers import research_source_controller as source_module
 from research_layer.api.controllers._state_store import ResearchApiStateStore
 from research_layer.api.controllers.research_graph_controller import ResearchGraphController
-from research_layer.services.evermemos_bridge_service import ResearchMemoryBridge
+from research_layer.api.controllers.research_source_controller import ResearchSourceController
+from research_layer.services.evermemos_bridge_service import (
+    ResearchMemoryBridge,
+    ResearchMemoryRecallService,
+)
 from research_layer.services.retrieval_views_service import ResearchRetrievalService
 from research_layer.services.source_import_service import SourceImportService
 
@@ -163,6 +174,136 @@ def test_source_import_writes_source_memory_before_recall(monkeypatch, tmp_path)
     assert calls[1][1]["source_id"] == source["source_id"]
 
 
+def test_local_source_sync_persists_addressable_memory_link(monkeypatch, tmp_path) -> None:
+    store = _store(tmp_path)
+    source = store.create_source(
+        workspace_id="ws_p2_source_link",
+        source_type="paper",
+        title="Memory source",
+        content="The paper argues that claim ledgers preserve provenance.",
+        metadata={},
+        import_request_id="req_p2_source_link",
+    )
+    bridge = ResearchMemoryBridge(store)
+    responses = iter([object(), ["log_source"], 1])
+
+    monkeypatch.delenv("RESEARCH_EVERMEMOS_BRIDGE_URL", raising=False)
+    monkeypatch.setattr(bridge, "_run_awaitable_blocking", lambda _factory: next(responses))
+
+    link = bridge.sync_source(
+        source=source,
+        request_id="req_p2_source_link",
+        source_hash={"source_id": source["source_id"], "sha256": "hash"},
+        artifact_count=1,
+    )
+    loaded = store.get_source(source_id=str(source["source_id"]))
+
+    assert link["status"] == "written_addressable_ref"
+    assert link["memory_id"] == f"local_memory_manager:source:{source['source_id']}"
+    assert loaded is not None
+    assert loaded["memory_link"]["memory_id"] == link["memory_id"]
+    resolved = ResearchRetrievalService(store).resolve_memory_item(
+        workspace_id="ws_p2_source_link",
+        view_type="evidence",
+        result_id=str(link["memory_id"]),
+    )
+    assert resolved is not None
+    assert resolved["supporting_refs"]["source_id"] == source["source_id"]
+
+
+def test_source_api_response_exposes_memory_link(monkeypatch, tmp_path) -> None:
+    store = _store(tmp_path)
+    source = store.create_source(
+        workspace_id="ws_p2_source_api",
+        source_type="paper",
+        title="Memory source",
+        content="Source content.",
+        metadata={},
+        import_request_id="req_p2_source_api",
+    )
+    store.upsert_source_memory_link(
+        source_id=str(source["source_id"]),
+        workspace_id="ws_p2_source_api",
+        memory_id=f"local_memory_manager:source:{source['source_id']}",
+        sync_mode="local_memory_manager",
+        status="written_addressable_ref",
+    )
+    monkeypatch.setattr(source_module, "STORE", store)
+    app = FastAPI()
+    ResearchSourceController().register_to_app(app)
+    client = TestClient(app)
+
+    response = client.get(f"/api/v1/research/sources/{source['source_id']}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["memory_link"]["memory_id"] == (
+        f"local_memory_manager:source:{source['source_id']}"
+    )
+
+
+def test_recall_queries_claim_and_source_groups(monkeypatch, tmp_path) -> None:
+    store = _store(tmp_path)
+    recall_service = ResearchMemoryRecallService(store)
+    request_groups: list[str] = []
+
+    class _FakeMemoryManager:
+        async def retrieve_mem(self, request):  # type: ignore[no-untyped-def]
+            group_id = str(request.group_id or "")
+            request_groups.append(group_id)
+            if (
+                group_id != "research_sources::ws_p2_source_recall"
+                or request.memory_types[0] != MemoryType.EPISODIC_MEMORY
+            ):
+                return RetrieveMemResponse()
+            return RetrieveMemResponse(
+                memories=[
+                    {
+                        group_id: [
+                            EpisodeMemory(
+                                memory_type=MemoryType.EPISODIC_MEMORY,
+                                user_id="research_layer_source_bridge",
+                                timestamp=datetime.now(timezone.utc),
+                                ori_event_id_list=["source::src_p2_recall"],
+                                group_id=group_id,
+                                id="mem_source_01",
+                                summary="Source summary",
+                                episode="Source-level memory from EverMemOS.",
+                            )
+                        ]
+                    }
+                ],
+                scores=[{group_id: [0.83]}],
+                importance_scores=[0.0],
+                original_data=[],
+                total_count=1,
+                has_more=False,
+            )
+
+    monkeypatch.setattr(recall_service, "_get_memory_manager", lambda: _FakeMemoryManager())
+
+    response = recall_service.recall(
+        workspace_id="ws_p2_source_recall",
+        query_text="source level memory",
+        requested_method="hybrid",
+        scope_claim_ids=[],
+        scope_mode="prefer",
+        top_k=5,
+        request_id="req_p2_source_recall",
+        trace_refs={"context_type": "source_import", "source_id": "src_p2_recall"},
+    )
+
+    assert response["status"] == "completed"
+    assert response["items"][0]["memory_id"] == "mem_source_01"
+    assert response["items"][0]["linked_source_refs"] == [{"source_id": "src_p2_recall"}]
+    assert response["trace_refs"]["group_ids"] == [
+        "research_claims::ws_p2_source_recall",
+        "research_sources::ws_p2_source_recall",
+    ]
+    assert "research_claims::ws_p2_source_recall" in request_groups
+    assert "research_sources::ws_p2_source_recall" in request_groups
+
+
 def test_source_import_still_emits_source_bridge_events_when_artifact_count_fails(
     monkeypatch, tmp_path
 ) -> None:
@@ -212,10 +353,16 @@ def test_graph_node_create_patch_and_edge_archive_resync_claim_memory(
     store = _store(tmp_path)
     workspace_id = "ws_p2_graph"
     claim = _seed_claim(store, workspace_id)
-    synced: list[str] = []
+    synced: list[dict[str, object]] = []
 
-    def _fake_sync_claim(self, *, claim, request_id):  # type: ignore[no-untyped-def]
-        synced.append(f"{request_id}:{claim['claim_id']}")
+    def _fake_sync_claim(self, *, claim, request_id, context=None):  # type: ignore[no-untyped-def]
+        synced.append(
+            {
+                "request_id": request_id,
+                "claim_id": claim["claim_id"],
+                "context": context or {},
+            }
+        )
         return {"status": "synced", "memory_id": f"mem_{claim['claim_id']}"}
 
     monkeypatch.setattr(graph_module, "STORE", store)
@@ -233,6 +380,9 @@ def test_graph_node_create_patch_and_edge_archive_resync_claim_memory(
                     "short_label": "Provenance",
                     "full_description": "Stable provenance makes memory reliable.",
                     "claim_id": str(claim["claim_id"]),
+                    "short_tags": ["memory", "graph"],
+                    "visibility": "private",
+                    "source_refs": [{"source_id": claim["source_id"], "page": 1}],
                 },
                 request_id="req_node_create",
             )
@@ -245,6 +395,9 @@ def test_graph_node_create_patch_and_edge_archive_resync_claim_memory(
                 body={
                     "workspace_id": workspace_id,
                     "short_label": "Provenance updated",
+                    "short_tags": ["updated", "memory"],
+                    "visibility": "package_public",
+                    "source_refs": [{"source_id": claim["source_id"], "page": 2}],
                 },
                 request_id="req_node_patch",
             ),
@@ -314,11 +467,28 @@ def test_graph_node_create_patch_and_edge_archive_resync_claim_memory(
         )
     )
 
-    assert synced == [
-        f"req_node_create:{claim['claim_id']}",
-        f"req_node_patch:{claim['claim_id']}",
-        f"req_edge_create:{claim['claim_id']}",
-        f"req_edge_patch:{claim['claim_id']}",
-        f"req_node_archive:{claim['claim_id']}",
-        f"req_edge_archive:{claim['claim_id']}",
+    assert [item["request_id"] for item in synced] == [
+        "req_node_create",
+        "req_node_patch",
+        "req_edge_create",
+        "req_edge_patch",
+        "req_node_archive",
+        "req_edge_archive",
     ]
+    node_patch = synced[1]["context"]
+    edge_patch = synced[3]["context"]
+    node_archive = synced[4]["context"]
+    edge_archive = synced[5]["context"]
+    assert node_patch["graph_action"] == "node_update"
+    assert node_patch["graph_object"]["short_label"] == "Provenance updated"
+    assert node_patch["graph_object"]["short_tags"] == ["updated", "memory"]
+    assert node_patch["graph_object"]["visibility"] == "package_public"
+    assert node_patch["graph_object"]["source_refs"] == [
+        {"source_id": claim["source_id"], "page": 2}
+    ]
+    assert edge_patch["graph_action"] == "edge_update"
+    assert edge_patch["graph_object"]["strength"] == 0.8
+    assert node_archive["archive_reason"] == "test archive"
+    assert node_archive["graph_object"]["status"] == "archived"
+    assert edge_archive["archive_reason"] == "test archive"
+    assert edge_archive["graph_object"]["status"] == "archived"

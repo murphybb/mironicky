@@ -119,6 +119,7 @@ class ResearchGraphController(BaseController):
         graph_object: dict[str, object],
         request_id: str,
         action: str,
+        extra_context: dict[str, object] | None = None,
     ) -> None:
         claim_id = str(graph_object.get("claim_id") or "").strip()
         workspace_id = str(graph_object.get("workspace_id") or "").strip()
@@ -136,8 +137,19 @@ class ResearchGraphController(BaseController):
                 error={"message": "claim not found"},
             )
             return
+        context: dict[str, object] = {
+            "context_type": "graph_edit",
+            "graph_action": action,
+            "graph_object": self._graph_memory_context(graph_object),
+        }
+        if extra_context:
+            context.update(extra_context)
         try:
-            self._memory_bridge.sync_claim(claim=claim, request_id=request_id)
+            self._memory_bridge.sync_claim(
+                claim=claim,
+                request_id=request_id,
+                context=context,
+            )
         except Exception as exc:
             self._repository.emit_event(
                 event_name="graph_claim_memory_sync_failed",
@@ -148,6 +160,35 @@ class ResearchGraphController(BaseController):
                 refs={"claim_id": claim_id, "action": action},
                 error={"message": str(exc)},
             )
+
+    def _graph_memory_context(self, graph_object: dict[str, object]) -> dict[str, object]:
+        allowed_keys = (
+            "node_id",
+            "edge_id",
+            "workspace_id",
+            "node_type",
+            "edge_type",
+            "object_ref_type",
+            "object_ref_id",
+            "claim_id",
+            "short_label",
+            "full_description",
+            "short_tags",
+            "visibility",
+            "source_refs",
+            "source_ref",
+            "source_node_id",
+            "target_node_id",
+            "strength",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        return {
+            key: graph_object[key]
+            for key in allowed_keys
+            if key in graph_object and graph_object[key] is not None
+        }
 
     def _graph_memory_recall_for_full_graph(self, *, workspace_id: str) -> dict[str, object]:
         return self._memory_recall_service.skipped(
@@ -905,7 +946,13 @@ class ResearchGraphController(BaseController):
             refs={"node_id": node_id, "version_id": version["version_id"]},
         )
         self._sync_graph_claim_memory(
-            graph_object=updated, request_id=request_id, action="node_archive"
+            graph_object=updated,
+            request_id=request_id,
+            action="node_archive",
+            extra_context={
+                "archive_reason": payload.reason,
+                "version_id": version["version_id"],
+            },
         )
         return GraphArchiveResponse(
             workspace_id=payload.workspace_id,
@@ -979,7 +1026,13 @@ class ResearchGraphController(BaseController):
             refs={"edge_id": edge_id, "version_id": version["version_id"]},
         )
         self._sync_graph_claim_memory(
-            graph_object=updated, request_id=request_id, action="edge_archive"
+            graph_object=updated,
+            request_id=request_id,
+            action="edge_archive",
+            extra_context={
+                "archive_reason": payload.reason,
+                "version_id": version["version_id"],
+            },
         )
         return GraphArchiveResponse(
             workspace_id=payload.workspace_id,
