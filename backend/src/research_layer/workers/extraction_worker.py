@@ -1915,6 +1915,7 @@ class ExtractionWorker:
     ) -> list[dict[str, object]]:
         deduped: list[dict[str, object]] = []
         seen_keys: set[tuple[str, str, str]] = set()
+        canonical_indexes: dict[str, int] = {}
         for candidate in raw_candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -1928,6 +1929,15 @@ class ExtractionWorker:
             )
             if not candidate_type or not text:
                 continue
+            candidate["text"] = text
+            canonical_key = self._canonical_claim_key(candidate)
+            if canonical_key is not None and canonical_key in canonical_indexes:
+                existing_index = canonical_indexes[canonical_key]
+                if self._dedupe_preference(candidate) > self._dedupe_preference(
+                    deduped[existing_index]
+                ):
+                    deduped[existing_index] = candidate
+                continue
             dedupe_key = (
                 candidate_type,
                 text.lower(),
@@ -1936,9 +1946,49 @@ class ExtractionWorker:
             if dedupe_key in seen_keys:
                 continue
             seen_keys.add(dedupe_key)
-            candidate["text"] = text
+            if canonical_key is not None:
+                canonical_indexes[canonical_key] = len(deduped)
             deduped.append(candidate)
         return deduped
+
+    def _canonical_claim_key(self, candidate: dict[str, object]) -> str | None:
+        source_span = candidate.get("source_span")
+        span_text = (
+            str(source_span.get("text") or "")
+            if isinstance(source_span, dict)
+            else ""
+        )
+        haystack = " ".join(
+            str(value or "")
+            for value in (
+                candidate.get("text"),
+                candidate.get("quote"),
+                span_text,
+            )
+        )
+        match = re.search(
+            r"(?:\bhypothesis\s+H\s*([1-9]\d*)\b|\bH\s*([1-9]\d*)\s*[:：])",
+            haystack,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        number = match.group(1) or match.group(2)
+        return f"paper_hypothesis:h{number}"
+
+    def _dedupe_preference(self, candidate: dict[str, object]) -> int:
+        score = 0
+        if str(candidate.get("extractor_name") or "") == (
+            "deterministic_explicit_paper_claim_extractor"
+        ):
+            score += 100
+        if str(candidate.get("candidate_type") or "") == "assumption":
+            score += 20
+        if str(candidate.get("semantic_type") or "") == "hypothesis":
+            score += 20
+        if re.match(r"\s*H\s*[1-9]\d*\s*[:：]", str(candidate.get("text") or "")):
+            score += 10
+        return score
 
     def _pick_semantic_segment(self, parsed: ParsedSource):
         for segment in parsed.segments:

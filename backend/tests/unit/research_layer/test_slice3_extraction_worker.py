@@ -140,6 +140,34 @@ def test_extraction_worker_adds_explicit_paper_hypotheses_and_conclusions(tmp_pa
     assert all(candidate["degraded"] is False for candidate in candidates)
 
 
+def test_extraction_worker_dedupes_llm_hypothesis_paraphrase(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content="H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
+        metadata={},
+    )
+    explicit = worker._build_explicit_paper_claim_candidates(
+        source={"source_type": "paper"},
+        parsed=parsed,
+        request_id="req_explicit_claims",
+    )
+    llm_paraphrase = {
+        "candidate_type": "conclusion",
+        "semantic_type": "claim",
+        "text": "Hypothesis H1: Consumers choose brands similar to their cognition under certain conditions",
+        "source_span": explicit[0]["source_span"],
+        "quote": explicit[0]["quote"],
+        "extractor_name": "argument_unit_extractor",
+    }
+
+    deduped = worker._dedupe_candidates([llm_paraphrase, explicit[0]])
+
+    assert len(deduped) == 1
+    assert deduped[0]["extractor_name"] == "deterministic_explicit_paper_claim_extractor"
+    assert str(deduped[0]["text"]).startswith("H1:")
+
+
 def test_extraction_worker_builds_traceable_source_artifacts(tmp_path) -> None:
     worker = ExtractionWorker(_build_store(tmp_path))
     parsed = SourceParser().parse(

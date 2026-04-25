@@ -26,6 +26,7 @@ Rules:
 - For papers, prefer this order: final conclusion or central claim, stated hypotheses/claims, research method/design, key positive results, key non-significant or negative results, boundary conditions, limitations/future work, then only the concepts needed to connect the chain.
 - If the chunk contains explicit signals such as "研究假设", "H1", "H2", "H3", "结果表明", "研究结论", "结论", "research hypothesis", "results show", "findings", or "we conclude", reserve units for those claims before extracting descriptive facts.
 - If numbered hypotheses such as H1/H2/H3 are visible, extract every visible numbered hypothesis as a separate unit before extracting sample sizes, demographics, brand percentages, or table metrics.
+- Preserve the source language and original hypothesis IDs. Do not translate or paraphrase H1/H2/H3 into English; if an H-numbered claim is already present, output that original claim only once.
 - If a final conclusion section is visible, extract the author's final central conclusion as semantic_type "conclusion" before extracting secondary experiment details.
 - Use semantic_type "conclusion" for the author's final answer, main finding, or stated conclusion. Use "hypothesis" only for a proposed H1/H2/H3-style claim that the paper tests.
 - Do not label sample size, age, gender, demographic composition, table row labels, or measurement descriptions as "hypothesis"; label them as sample, population, metric, method, or result as appropriate.
