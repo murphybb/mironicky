@@ -21,6 +21,7 @@ from prometheus_client import Counter, Histogram
 from core.observation.logger import get_logger
 from core.observation.metrics.registry import get_metrics_registry
 from research_layer.api.controllers._state_store import ResearchApiStateStore
+from research_layer.services.evermemos_bridge_service import ResearchMemoryBridge
 from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
 
 _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
@@ -204,6 +205,7 @@ class SourceImportService:
     def __init__(self, store: ResearchApiStateStore) -> None:
         self._store = store
         self._source_memory_recall_service = SourceMemoryRecallService(store)
+        self._memory_bridge = ResearchMemoryBridge(store)
 
     def import_source(
         self,
@@ -352,6 +354,47 @@ class SourceImportService:
                     "source_input_mode": resolved.source_input_mode,
                 },
             )
+            try:
+                artifact_count = len(
+                    self._store.list_source_artifacts(
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "research.source_import.source_artifact_count_failed req=%s workspace=%s source_id=%s",
+                    request_id,
+                    workspace_id,
+                    source["source_id"],
+                )
+                artifact_count = 0
+            try:
+                source_hash = self._store.get_source_hash_for_source(
+                    str(source["source_id"])
+                )
+            except Exception:
+                logger.exception(
+                    "research.source_import.source_hash_lookup_failed req=%s workspace=%s source_id=%s",
+                    request_id,
+                    workspace_id,
+                    source["source_id"],
+                )
+                source_hash = None
+            try:
+                self._memory_bridge.sync_source(
+                    source=source,
+                    request_id=request_id,
+                    source_hash=source_hash,
+                    artifact_count=artifact_count,
+                )
+            except Exception:
+                logger.exception(
+                    "research.source_import.memory_sync_failed req=%s workspace=%s source_id=%s",
+                    request_id,
+                    workspace_id,
+                    source["source_id"],
+                )
             try:
                 self._source_memory_recall_service.recall_for_source(
                     workspace_id=workspace_id,

@@ -60,7 +60,10 @@ from research_layer.services.claim_projection_guard_service import (
 from research_layer.services.graph_build_service import GraphBuildService
 from research_layer.services.graph_query_service import GraphQueryService
 from research_layer.services.graph_report_service import GraphReportService
-from research_layer.services.evermemos_bridge_service import EverMemOSRecallService
+from research_layer.services.evermemos_bridge_service import (
+    EverMemOSRecallService,
+    ResearchMemoryBridge,
+)
 from research_layer.services.research_export_service import ResearchExportService
 
 
@@ -76,6 +79,7 @@ class ResearchGraphController(BaseController):
         self._report_service = GraphReportService(STORE)
         self._export_service = ResearchExportService(STORE)
         self._memory_recall_service = EverMemOSRecallService(STORE)
+        self._memory_bridge = ResearchMemoryBridge(STORE)
         self._claim_guard = ClaimProjectionGuardService(STORE)
 
     def _require_projection_claim(
@@ -108,6 +112,42 @@ class ResearchGraphController(BaseController):
             workspace_id=str(raw_payload.get("workspace_id") or ""),
             claim_id=None,
         )
+
+    def _sync_graph_claim_memory(
+        self,
+        *,
+        graph_object: dict[str, object],
+        request_id: str,
+        action: str,
+    ) -> None:
+        claim_id = str(graph_object.get("claim_id") or "").strip()
+        workspace_id = str(graph_object.get("workspace_id") or "").strip()
+        if not claim_id or not workspace_id:
+            return
+        claim = STORE.get_claim(claim_id)
+        if claim is None:
+            self._repository.emit_event(
+                event_name="graph_claim_memory_sync_skipped",
+                request_id=request_id,
+                workspace_id=workspace_id,
+                step="claim_memory_sync",
+                status="skipped",
+                refs={"claim_id": claim_id, "action": action},
+                error={"message": "claim not found"},
+            )
+            return
+        try:
+            self._memory_bridge.sync_claim(claim=claim, request_id=request_id)
+        except Exception as exc:
+            self._repository.emit_event(
+                event_name="graph_claim_memory_sync_failed",
+                request_id=request_id,
+                workspace_id=workspace_id,
+                step="claim_memory_sync",
+                status="failed",
+                refs={"claim_id": claim_id, "action": action},
+                error={"message": str(exc)},
+            )
 
     def _graph_memory_recall_for_full_graph(self, *, workspace_id: str) -> dict[str, object]:
         return self._memory_recall_service.skipped(
@@ -594,6 +634,9 @@ class ResearchGraphController(BaseController):
             status="completed",
             refs={"node_id": node["node_id"], "object_ref_id": payload.object_ref_id},
         )
+        self._sync_graph_claim_memory(
+            graph_object=node, request_id=request_id, action="node_create"
+        )
         return GraphNodeResponse.model_validate(node)
 
     @patch(
@@ -664,6 +707,9 @@ class ResearchGraphController(BaseController):
             status="completed",
             refs={"node_id": node_id},
         )
+        self._sync_graph_claim_memory(
+            graph_object=updated, request_id=request_id, action="node_update"
+        )
         return GraphNodeResponse.model_validate(updated)
 
     @post(
@@ -723,6 +769,9 @@ class ResearchGraphController(BaseController):
             step="edge_create",
             status="completed",
             refs={"edge_id": edge["edge_id"]},
+        )
+        self._sync_graph_claim_memory(
+            graph_object=edge, request_id=request_id, action="edge_create"
         )
         return GraphEdgeResponse.model_validate(edge)
 
@@ -788,6 +837,9 @@ class ResearchGraphController(BaseController):
             status="completed",
             refs={"edge_id": edge_id},
         )
+        self._sync_graph_claim_memory(
+            graph_object=updated, request_id=request_id, action="edge_update"
+        )
         return GraphEdgeResponse.model_validate(updated)
 
     @delete(
@@ -851,6 +903,9 @@ class ResearchGraphController(BaseController):
             step="node_archive",
             status="completed",
             refs={"node_id": node_id, "version_id": version["version_id"]},
+        )
+        self._sync_graph_claim_memory(
+            graph_object=updated, request_id=request_id, action="node_archive"
         )
         return GraphArchiveResponse(
             workspace_id=payload.workspace_id,
@@ -922,6 +977,9 @@ class ResearchGraphController(BaseController):
             step="edge_archive",
             status="completed",
             refs={"edge_id": edge_id, "version_id": version["version_id"]},
+        )
+        self._sync_graph_claim_memory(
+            graph_object=updated, request_id=request_id, action="edge_archive"
         )
         return GraphArchiveResponse(
             workspace_id=payload.workspace_id,

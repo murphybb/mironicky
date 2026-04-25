@@ -738,6 +738,11 @@ class ResearchRetrievalService:
         view = str(view_type).strip()
         if view not in RETRIEVAL_VIEW_VALUES or view not in self._view_services:
             return None
+        local_claim = self._resolve_local_claim_memory(
+            workspace_id=workspace_id, result_id=result_id
+        )
+        if local_claim is not None:
+            return local_claim
         context = RetrievalContext(self._store, workspace_id)
         service = self._view_services[view]
         for doc in service.collect_documents(context=context):
@@ -767,6 +772,46 @@ class ResearchRetrievalService:
                 "authority_summary": item["authority_summary"],
             }
         return None
+
+    def _resolve_local_claim_memory(
+        self, *, workspace_id: str, result_id: str
+    ) -> dict[str, object] | None:
+        prefix = "local_memory_manager:claim:"
+        raw_id = str(result_id).strip()
+        if not raw_id.startswith(prefix):
+            return None
+        claim_id = raw_id[len(prefix):].strip()
+        if not claim_id:
+            return None
+        claim = self._store.get_claim(claim_id)
+        if claim is None or str(claim["workspace_id"]) != workspace_id:
+            return None
+        source = self._store.get_source(str(claim["source_id"]))
+        source_ref = {
+            "source_id": claim["source_id"],
+            "title": source.get("title") if source is not None else None,
+            "source_type": source.get("source_type") if source is not None else None,
+        }
+        object_type = str(claim.get("claim_type") or "claim")
+        object_id = str(claim.get("candidate_id") or claim_id)
+        return {
+            "result_id": raw_id,
+            "title": f"Claim {claim_id}",
+            "snippet": str(claim.get("text") or "")[:240],
+            "source_ref": source_ref,
+            "graph_refs": {},
+            "formal_refs": [{"object_type": object_type, "object_id": object_id}],
+            "supporting_refs": {"claim_id": claim_id, "source_id": claim["source_id"]},
+            "trace_refs": {
+                "memory_id": raw_id,
+                "memory_origin": "local_memory_manager",
+                "claim_id": claim_id,
+            },
+            "evidence_refs": [],
+            "evidence_highlight_spans": [],
+            "mechanism_relation_highlights": [],
+            "authority_summary": {},
+        }
 
     def _normalize_filter_values(
         self, metadata_filters: dict[str, object]

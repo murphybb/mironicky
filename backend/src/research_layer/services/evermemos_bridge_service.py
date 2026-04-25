@@ -23,7 +23,9 @@ from service.memory_request_log_service import MemoryRequestLogService
 logger = get_logger(__name__)
 _T = TypeVar("_T")
 _CLAIM_EVENT_PREFIX = "claim::"
+_SOURCE_EVENT_PREFIX = "source::"
 _RESEARCH_CLAIM_GROUP_PREFIX = "research_claims::"
+_RESEARCH_SOURCE_GROUP_PREFIX = "research_sources::"
 _RECALL_MEMORY_TYPES = (
     MemoryType.EPISODIC_MEMORY,
     MemoryType.EVENT_LOG,
@@ -43,6 +45,10 @@ _FALSEY_ENV_VALUES = {"0", "false", "no", "off", "disabled"}
 
 def _build_research_claim_group_id(workspace_id: str) -> str:
     return f"{_RESEARCH_CLAIM_GROUP_PREFIX}{workspace_id}"
+
+
+def _build_research_source_group_id(workspace_id: str) -> str:
+    return f"{_RESEARCH_SOURCE_GROUP_PREFIX}{workspace_id}"
 
 
 class _AsyncMemoryRuntimeMixin:
@@ -162,6 +168,73 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
                 last_error={"message": str(exc)},
             )
 
+    def sync_source(
+        self,
+        *,
+        source: dict[str, object],
+        request_id: str,
+        source_hash: dict[str, object] | None = None,
+        artifact_count: int = 0,
+    ) -> dict[str, object]:
+        workspace_id = str(source["workspace_id"])
+        source_id = str(source["source_id"])
+        self._store.emit_event(
+            event_name="source_memory_bridge_started",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            source_id=source_id,
+            component="evermemos_bridge_service",
+            step="source_memory_bridge",
+            status="started",
+            refs={"source_id": source_id},
+        )
+
+        endpoint = os.getenv("RESEARCH_EVERMEMOS_BRIDGE_URL", "").strip()
+        try:
+            if endpoint:
+                response = self._sync_source_over_http(
+                    endpoint=endpoint,
+                    source=source,
+                    source_hash=source_hash,
+                    artifact_count=artifact_count,
+                    request_id=request_id,
+                )
+                memory_id = str(response.get("memory_id") or "").strip()
+                if not memory_id:
+                    raise ValueError("bridge response missing memory_id")
+                return self._finalize_source_sync(
+                    source=source,
+                    request_id=request_id,
+                    memory_id=memory_id,
+                    sync_mode="http",
+                    status="synced",
+                    reason=None,
+                    last_error=None,
+                )
+            return self._sync_source_to_local_memory(
+                source=source,
+                source_hash=source_hash,
+                artifact_count=artifact_count,
+                request_id=request_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research.source_memory_bridge.failed request_id=%s source_id=%s reason=%s",
+                request_id,
+                source_id,
+                str(exc),
+            )
+            return self._finalize_source_sync(
+                source=source,
+                request_id=request_id,
+                memory_id=None,
+                sync_mode="http" if endpoint else "local_memory_manager",
+                status="failed",
+                reason=self._normalize_reason(str(exc)),
+                last_error={"message": str(exc)},
+            )
+
     def _sync_to_local_memory(
         self,
         *,
@@ -191,10 +264,10 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
                 return self._finalize_link(
                     claim=claim,
                     request_id=request_id,
-                    memory_id=None,
+                    memory_id=self._local_claim_memory_id(claim_id=str(claim["claim_id"])),
                     sync_mode="local_memory_manager",
-                    status="written_unaddressable",
-                    reason="addressable_memory_id_unavailable",
+                    status="written_addressable_ref",
+                    reason=None,
                     last_error=None,
                     extra_refs={"message_log_ref": message_log_ref},
                 )
@@ -225,6 +298,56 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
                 last_error={"message": str(exc)},
             )
 
+    def _sync_source_to_local_memory(
+        self,
+        *,
+        source: dict[str, object],
+        source_hash: dict[str, object] | None,
+        artifact_count: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        message_payload = self._build_source_local_message_payload(
+            source=source, source_hash=source_hash, artifact_count=artifact_count
+        )
+        memorize_request = self._run_awaitable_blocking(
+            lambda: convert_simple_message_to_memorize_request(message_payload)
+        )
+        message_ids = self._run_awaitable_blocking(
+            lambda: self._get_memory_request_log_service().save_request_logs(
+                request=memorize_request,
+                version="research-p2",
+                endpoint_name="research_source_bridge",
+                method="LOCAL",
+                url="research://source-memory-bridge",
+                raw_input_dict=message_payload,
+            )
+        )
+        memorize_count = self._run_awaitable_blocking(
+            lambda: self._get_memory_manager().memorize(memorize_request)
+        )
+        message_log_ref = self._build_message_log_ref(message_ids)
+        if int(memorize_count) > 0:
+            return self._finalize_source_sync(
+                source=source,
+                request_id=request_id,
+                memory_id=self._local_source_memory_id(source_id=str(source["source_id"])),
+                sync_mode="local_memory_manager",
+                status="written_addressable_ref",
+                reason=None,
+                last_error=None,
+                extra_refs={"message_log_ref": message_log_ref},
+            )
+        return self._finalize_source_sync(
+            source=source,
+            request_id=request_id,
+            memory_id=None,
+            sync_mode="local_memory_manager",
+            status="logged_only",
+            reason="memorize_returned_zero",
+            last_error=None,
+            extra_refs={"message_log_ref": message_log_ref},
+        )
+
     def _sync_over_http(
         self,
         *,
@@ -233,6 +356,57 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         request_id: str,
     ) -> dict[str, object]:
         payload = json.dumps(self._build_claim_payload(claim)).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "X-Request-Id": request_id,
+        }
+        token = os.getenv("RESEARCH_EVERMEMOS_BRIDGE_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        timeout_s = float(os.getenv("RESEARCH_EVERMEMOS_BRIDGE_TIMEOUT_S", "5") or "5")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                status_code = getattr(response, "status", None) or response.getcode()
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"http_{int(exc.code)}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"transport_error:{exc.reason}") from exc
+
+        if int(status_code) >= 400:
+            raise RuntimeError(f"http_{int(status_code)}")
+        if not body:
+            return {}
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("invalid_json_response") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("invalid_bridge_response")
+        return decoded
+
+    def _sync_source_over_http(
+        self,
+        *,
+        endpoint: str,
+        source: dict[str, object],
+        source_hash: dict[str, object] | None,
+        artifact_count: int,
+        request_id: str,
+    ) -> dict[str, object]:
+        payload = json.dumps(
+            self._build_source_payload(
+                source=source,
+                source_hash=source_hash,
+                artifact_count=artifact_count,
+            )
+        ).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "X-Request-Id": request_id,
@@ -289,8 +463,38 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             "content": str(claim.get("text") or "").strip(),
         }
 
+    def _build_source_local_message_payload(
+        self,
+        *,
+        source: dict[str, object],
+        source_hash: dict[str, object] | None,
+        artifact_count: int,
+    ) -> dict[str, object]:
+        source_id = str(source["source_id"])
+        workspace_id = str(source["workspace_id"])
+        created_at = source.get("updated_at") or source.get("created_at")
+        if isinstance(created_at, datetime):
+            created_at_iso = created_at.astimezone(timezone.utc).isoformat()
+        else:
+            created_at_iso = datetime.now(timezone.utc).isoformat()
+        return {
+            "group_id": _build_research_source_group_id(workspace_id),
+            "group_name": f"Research Sources {workspace_id}",
+            "message_id": f"{_SOURCE_EVENT_PREFIX}{source_id}",
+            "create_time": created_at_iso,
+            "sender": "research_layer_source_bridge",
+            "sender_name": "research_layer_source_bridge",
+            "role": "assistant",
+            "content": self._source_memory_content(
+                source=source,
+                source_hash=source_hash,
+                artifact_count=artifact_count,
+            ),
+        }
+
     def _build_claim_payload(self, claim: dict[str, object]) -> dict[str, object]:
         return {
+            "memory_kind": "claim",
             "claim_id": claim["claim_id"],
             "workspace_id": claim["workspace_id"],
             "source_id": claim["source_id"],
@@ -304,6 +508,25 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             "trace_refs": claim.get("trace_refs", {}),
         }
 
+    def _build_source_payload(
+        self,
+        *,
+        source: dict[str, object],
+        source_hash: dict[str, object] | None,
+        artifact_count: int,
+    ) -> dict[str, object]:
+        return {
+            "memory_kind": "source",
+            "workspace_id": source["workspace_id"],
+            "source_id": source["source_id"],
+            "source_type": source["source_type"],
+            "title": source["title"],
+            "content_preview": self._source_preview(source),
+            "metadata": source.get("metadata", {}),
+            "source_hash": source_hash or {},
+            "artifact_count": int(artifact_count),
+        }
+
     def _get_memory_request_log_service(self) -> MemoryRequestLogService:
         return MemoryRequestLogService()
 
@@ -314,6 +537,45 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
         if not message_id:
             return None
         return f"message_log:{message_id}"
+
+    def _local_claim_memory_id(self, *, claim_id: str) -> str:
+        return f"local_memory_manager:claim:{claim_id}"
+
+    def _local_source_memory_id(self, *, source_id: str) -> str:
+        return f"local_memory_manager:source:{source_id}"
+
+    def _source_preview(self, source: dict[str, object], *, max_chars: int = 1200) -> str:
+        content = str(
+            source.get("normalized_content") or source.get("content") or ""
+        ).strip()
+        normalized = " ".join(content.split())
+        return normalized[:max_chars]
+
+    def _source_memory_content(
+        self,
+        *,
+        source: dict[str, object],
+        source_hash: dict[str, object] | None,
+        artifact_count: int,
+    ) -> str:
+        hash_parts: list[str] = []
+        if source_hash:
+            for key in ("content_sha256", "parser_name", "parser_version"):
+                value = str(source_hash.get(key) or "").strip()
+                if value:
+                    hash_parts.append(f"{key}={value}")
+        lines = [
+            f"Source title: {source.get('title')}",
+            f"Source id: {source.get('source_id')}",
+            f"Source type: {source.get('source_type')}",
+            f"Artifact count: {int(artifact_count)}",
+        ]
+        if hash_parts:
+            lines.append(f"Source hash: {'; '.join(hash_parts)}")
+        preview = self._source_preview(source)
+        if preview:
+            lines.append(f"Content preview: {preview}")
+        return "\n".join(lines)
 
     def _finalize_link(
         self,
@@ -355,6 +617,47 @@ class ResearchMemoryBridge(_AsyncMemoryRuntimeMixin):
             error=last_error,
         )
         return link
+
+    def _finalize_source_sync(
+        self,
+        *,
+        source: dict[str, object],
+        request_id: str,
+        memory_id: str | None,
+        sync_mode: str,
+        status: str,
+        reason: str | None,
+        last_error: dict[str, object] | None,
+        extra_refs: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        result = {
+            "workspace_id": source["workspace_id"],
+            "source_id": source["source_id"],
+            "memory_id": memory_id,
+            "sync_mode": sync_mode,
+            "status": status,
+            "reason": reason,
+            "last_error": last_error,
+        }
+        self._store.emit_event(
+            event_name="source_memory_bridge_completed",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=str(source["workspace_id"]),
+            source_id=str(source["source_id"]),
+            component="evermemos_bridge_service",
+            step="source_memory_bridge",
+            status=status,
+            refs={
+                "source_id": source["source_id"],
+                "memory_id": memory_id,
+                "sync_mode": sync_mode,
+                "reason": reason,
+                **(extra_refs or {}),
+            },
+            error=last_error,
+        )
+        return result
 
     def _normalize_reason(self, reason: str) -> str:
         normalized = str(reason or "").strip()
