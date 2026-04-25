@@ -81,6 +81,65 @@ def test_extraction_worker_resolves_pdf_whitespace_span(tmp_path) -> None:
     assert "品牌态度" in text
 
 
+def test_extraction_worker_adds_explicit_paper_hypotheses_and_conclusions(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content=(
+            "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。"
+            "H2:社会主流向善一致性中介于文化认知与品牌态度之间,有积极的影响。"
+            "H3:当消费者与多种品牌都具有相同的文化认知时,消费者会根据品牌的社会主流向善对品牌进行差别排序。"
+            "结论及启示 本文以三个实验为基础,探讨了消费者认知对品牌态度的正向影响、"
+            "社会主流向善一致性的中介作用、差序格局的调节作用。最终得出以下结论:"
+            "第一,消费者决策与消费者认知有高度相关性。"
+            "第二,社会主流向善一致性对品牌态度呈显著的正向影响。"
+            "第三,消费者会根据品牌的社会主流向善性进行差别排序,但结果并不显著。"
+        ),
+        metadata={},
+    )
+
+    candidates = worker._build_explicit_paper_claim_candidates(
+        source={"source_type": "paper"},
+        parsed=parsed,
+        request_id="req_explicit_claims",
+    )
+
+    assumption_texts = [
+        str(candidate["text"])
+        for candidate in candidates
+        if candidate["candidate_type"] == "assumption"
+    ]
+    conclusion_texts = [
+        str(candidate["text"])
+        for candidate in candidates
+        if candidate["candidate_type"] == "conclusion"
+    ]
+
+    assert len(assumption_texts) == 3
+    assert any(text.startswith("H1:") for text in assumption_texts)
+    assert any(text.startswith("H2:") for text in assumption_texts)
+    assert any(text.startswith("H3:") for text in assumption_texts)
+    assert any("消费者决策与消费者认知" in text for text in conclusion_texts)
+    assert any("社会主流向善一致性" in text for text in conclusion_texts)
+    assert any("差别排序" in text for text in conclusion_texts)
+    assert {str(candidate["semantic_type"]) for candidate in candidates} == {
+        "hypothesis",
+        "conclusion",
+    }
+    units = worker._explicit_candidates_to_argument_units(candidates)
+    assert len(units) == len(candidates)
+    assert all(
+        candidate["trace_refs"]["argument_unit_id"] == unit["unit_id"]
+        for candidate, unit in zip(candidates, units, strict=True)
+    )
+    assert {str(unit["semantic_type"]) for unit in units} == {
+        "hypothesis",
+        "conclusion",
+    }
+    assert all(candidate["fallback_used"] is False for candidate in candidates)
+    assert all(candidate["degraded"] is False for candidate in candidates)
+
+
 def test_extraction_worker_builds_traceable_source_artifacts(tmp_path) -> None:
     worker = ExtractionWorker(_build_store(tmp_path))
     parsed = SourceParser().parse(

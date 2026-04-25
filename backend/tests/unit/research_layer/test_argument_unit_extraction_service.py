@@ -204,8 +204,8 @@ async def test_argument_unit_extractor_caps_dense_outputs() -> None:
         failure_mode=None,
     )
 
-    assert len(units) == 12
-    assert units[-1]["unit_id"] == "u12"
+    assert len(units) == 16
+    assert units[-1]["unit_id"] == "u16"
 
 
 @pytest.mark.asyncio

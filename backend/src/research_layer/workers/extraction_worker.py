@@ -312,6 +312,18 @@ class ExtractionWorker:
                             },
                         )
                         continue
+                    if chunk.chunk_index == 0:
+                        explicit_candidates = self._build_explicit_paper_claim_candidates(
+                            source=source,
+                            parsed=parsed,
+                            request_id=request_id,
+                        )
+                        mapped_candidates.extend(explicit_candidates)
+                        units.extend(
+                            self._explicit_candidates_to_argument_units(
+                                explicit_candidates
+                            )
+                        )
                     raw_candidates.extend(mapped_candidates)
                     if unit_trace is not None:
                         latest_trace = unit_trace
@@ -803,7 +815,7 @@ class ExtractionWorker:
         model: str | None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], LLMCallResult | None]:
         source_id = str(source["source_id"])
-        cache_key = "candidate:argument_unit_extractor:v7_numbered_hypotheses_16"
+        cache_key = "candidate:argument_unit_extractor:v9_explicit_claim_relation_units"
         cached = self._store.get_source_chunk_cache(
             workspace_id=workspace_id,
             source_id=source_id,
@@ -1703,6 +1715,104 @@ class ExtractionWorker:
             )
 
         return supplemental
+
+    def _build_explicit_paper_claim_candidates(
+        self,
+        *,
+        source: dict[str, object],
+        parsed: ParsedSource,
+        request_id: str,
+    ) -> list[dict[str, object]]:
+        if str(source.get("source_type") or parsed.source_type) != "paper":
+            return []
+
+        content = parsed.normalized_content
+        candidates: list[dict[str, object]] = []
+
+        def add_candidate(candidate_type: str, raw_text: str, semantic_type: str) -> None:
+            text = re.sub(r"\s+", " ", str(raw_text or "").strip())
+            if len(text) < 12:
+                return
+            start, end, span_text = self._resolve_source_span(
+                parsed=parsed,
+                primary_query=raw_text,
+                secondary_query=text,
+            )
+            if start < 0 or not span_text:
+                return
+            candidates.append(
+                {
+                    "candidate_type": candidate_type,
+                    "semantic_type": semantic_type,
+                    "text": self._normalize_candidate_text(text),
+                    "source_span": {"start": start, "end": end, "text": span_text},
+                    "quote": span_text,
+                    "extractor_name": "deterministic_explicit_paper_claim_extractor",
+                    "provider_backend": self._resolve_backend_hint(),
+                    "provider_model": "deterministic_parser",
+                    "request_id": request_id,
+                    "llm_response_id": request_id,
+                    "usage": _normalized_usage(None),
+                    "fallback_used": False,
+                    "degraded": False,
+                    "degraded_reason": None,
+                    "trace_refs": {
+                        "semantic_type": semantic_type,
+                        "extraction_rule": "explicit_paper_claim",
+                    },
+                }
+            )
+
+        for match in re.finditer(r"\bH\d+\s*[:：]\s*[^。！？!?]{8,260}[。！？!?]?", content):
+            add_candidate("assumption", match.group(0), "hypothesis")
+
+        conclusion_start = content.find("结论及启示")
+        if conclusion_start < 0:
+            conclusion_start = content.find("最终得出以下结论")
+        if conclusion_start >= 0:
+            conclusion_text = content[conclusion_start : conclusion_start + 2600]
+            for match in re.finditer(
+                r"(?:第一|第二|第三)[，,、]\s*.{20,420}?(?=(?:第二|第三)[，,、]|（二）|\(二\)|管理启示|研究表明|$)",
+                conclusion_text,
+            ):
+                add_candidate("conclusion", match.group(0), "conclusion")
+            for match in re.finditer(r"研究表明.{20,420}?竞争优势。", conclusion_text):
+                add_candidate("conclusion", match.group(0), "conclusion")
+
+        return candidates
+
+    def _explicit_candidates_to_argument_units(
+        self, candidates: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        units: list[dict[str, object]] = []
+        for index, candidate in enumerate(candidates, start=1):
+            trace_refs = candidate.get("trace_refs")
+            if not isinstance(trace_refs, dict):
+                trace_refs = {}
+                candidate["trace_refs"] = trace_refs
+            unit_id = str(trace_refs.get("argument_unit_id") or "").strip()
+            if not unit_id:
+                unit_id = f"explicit_paper_claim_{index}"
+                trace_refs["argument_unit_id"] = unit_id
+            semantic_type = str(candidate.get("semantic_type") or "").strip()
+            candidate_type = str(candidate.get("candidate_type") or "").strip()
+            text = str(candidate.get("text") or "").strip()
+            quote = str(candidate.get("quote") or text).strip()
+            units.append(
+                {
+                    "unit_id": unit_id,
+                    "semantic_type": semantic_type,
+                    "candidate_type": candidate_type,
+                    "text": text,
+                    "normalized_label": text[:60],
+                    "domain_profile": ["social_science"],
+                    "domain_tags": [semantic_type] if semantic_type else [],
+                    "confidence_score": 1.0,
+                    "quote": quote,
+                    "anchor": {},
+                }
+            )
+        return units
 
     def _normalize_candidate_text(self, raw_text: str) -> str:
         normalized = re.sub(r"\s+", " ", str(raw_text or "").strip())
