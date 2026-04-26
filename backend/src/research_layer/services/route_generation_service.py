@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from dataclasses import dataclass
 
 from research_layer.api.controllers._state_store import ResearchApiStateStore
@@ -125,14 +127,11 @@ class RouteGenerationService:
             latest_trace_refs: dict[str, object] = {}
             latest_trace_metrics: dict[str, object] = {}
 
+            prepared_routes: list[dict[str, object]] = []
             for index, candidate in enumerate(candidates):
-                seed_summary, _ = await self._summarizer.summarize(
+                seed_summary = self._build_seed_summary(
                     candidate=candidate,
                     node_map=node_map,
-                    top_factors=[],
-                    request_id=request_id,
-                    failure_mode=failure_mode,
-                    allow_fallback=allow_fallback,
                 )
                 relation_tags = self._build_relation_tags(
                     candidate=candidate,
@@ -199,14 +198,30 @@ class RouteGenerationService:
                         str(node_id) for node_id in candidate.get("route_node_ids", [])
                     ],
                 )
-                final_summary, llm_trace = await self._summarizer.summarize(
-                    candidate=candidate,
-                    node_map=node_map,
-                    top_factors=scored.get("top_factors", []),
-                    request_id=request_id,
-                    failure_mode=failure_mode,
-                    allow_fallback=allow_fallback,
+                prepared_routes.append(
+                    {
+                        "index": index,
+                        "candidate": candidate,
+                        "route_id": route_id,
+                        "scored": scored,
+                    }
                 )
+
+            summary_results = await self._summarize_prepared_routes(
+                prepared_routes=prepared_routes,
+                node_map=node_map,
+                request_id=request_id,
+                failure_mode=failure_mode,
+                allow_fallback=allow_fallback,
+            )
+            for prepared_route, summary_result in zip(prepared_routes, summary_results):
+                index = int(prepared_route["index"])
+                candidate = prepared_route["candidate"]
+                assert isinstance(candidate, dict)
+                route_id = str(prepared_route["route_id"])
+                scored = prepared_route["scored"]
+                assert isinstance(scored, dict)
+                final_summary, llm_trace = summary_result
                 trace_refs, trace_metrics = build_event_trace_parts(llm_trace)
                 latest_trace_refs = trace_refs
                 latest_trace_metrics = trace_metrics
@@ -331,9 +346,25 @@ class RouteGenerationService:
                 ],
                 "top_route_id": str(top_route["route_id"]) if top_route else None,
             }
+        except asyncio.CancelledError:
+            self._delete_generated_routes(generated_route_ids)
+            self._store.emit_event(
+                event_name="route_generation_completed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                component="route_generation_service",
+                step="generate",
+                status="failed",
+                error={
+                    "error_code": "research.route_generation_cancelled",
+                    "message": "route generation was cancelled before summaries completed",
+                    "details": {},
+                },
+            )
+            raise
         except (RouteGenerationServiceError, ScoreServiceError, ResearchLLMError) as exc:
-            for generated_route_id in generated_route_ids:
-                self._store.delete_route(generated_route_id)
+            self._delete_generated_routes(generated_route_ids)
             self._store.emit_event(
                 event_name="route_generation_completed",
                 request_id=request_id,
@@ -356,6 +387,67 @@ class RouteGenerationService:
                 message=exc.message,
                 details=exc.details,
             )
+        except Exception as exc:
+            self._delete_generated_routes(generated_route_ids)
+            self._store.emit_event(
+                event_name="route_generation_completed",
+                request_id=request_id,
+                job_id=None,
+                workspace_id=workspace_id,
+                component="route_generation_service",
+                step="generate",
+                status="failed",
+                error={
+                    "error_code": "research.internal_error",
+                    "message": str(exc),
+                    "details": {},
+                },
+            )
+            raise
+
+    async def _summarize_prepared_routes(
+        self,
+        *,
+        prepared_routes: list[dict[str, object]],
+        node_map: dict[str, dict[str, object]],
+        request_id: str,
+        failure_mode: str | None,
+        allow_fallback: bool,
+    ) -> list[tuple[dict[str, object], object]]:
+        semaphore = asyncio.Semaphore(self._route_summary_concurrency())
+
+        async def _summarize(
+            prepared_route: dict[str, object]
+        ) -> tuple[dict[str, object], object]:
+            candidate = prepared_route["candidate"]
+            scored = prepared_route["scored"]
+            assert isinstance(candidate, dict)
+            assert isinstance(scored, dict)
+            async with semaphore:
+                return await self._summarizer.summarize(
+                    candidate=candidate,
+                    node_map=node_map,
+                    top_factors=scored.get("top_factors", []),
+                    request_id=request_id,
+                    failure_mode=failure_mode,
+                    allow_fallback=allow_fallback,
+                )
+
+        return await asyncio.gather(
+            *(_summarize(prepared_route) for prepared_route in prepared_routes)
+        )
+
+    def _route_summary_concurrency(self) -> int:
+        raw_value = os.getenv("RESEARCH_ROUTE_SUMMARY_CONCURRENCY", "4")
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = 4
+        return min(max(value, 1), 8)
+
+    def _delete_generated_routes(self, route_ids: list[str]) -> None:
+        for route_id in route_ids:
+            self._store.delete_route(route_id)
 
     def _build_relation_tags(
         self,
@@ -364,6 +456,13 @@ class RouteGenerationService:
         node_map: dict[str, dict[str, object]],
     ) -> list[str]:
         tags: list[str] = []
+        conclusion_node = node_map.get(str(candidate.get("conclusion_node_id") or ""))
+        conclusion_node_type = str((conclusion_node or {}).get("node_type") or "")
+        if conclusion_node_type in {"conclusion", "assumption", "validation", "branch"}:
+            tags.append("claim_centered")
+        elif conclusion_node_type == "evidence":
+            tags.append("evidence_centered")
+
         key_support_node_ids = [
             str(node_id) for node_id in candidate.get("key_support_node_ids", [])
         ]
@@ -397,3 +496,54 @@ class RouteGenerationService:
         if not tags:
             tags.append("upstream_inspiration")
         return tags
+
+    def _build_seed_summary(
+        self,
+        *,
+        candidate: dict[str, object],
+        node_map: dict[str, dict[str, object]],
+    ) -> dict[str, object]:
+        conclusion_node_id = str(candidate.get("conclusion_node_id") or "")
+        conclusion_node = node_map.get(conclusion_node_id, {})
+        conclusion = self._node_label(conclusion_node) or "Pending route summary"
+        support_labels = [
+            self._node_label(node_map.get(str(node_id), {}))
+            for node_id in candidate.get("key_support_node_ids", [])
+        ]
+        support_labels = [label for label in support_labels if label]
+        assumption_labels = [
+            self._node_label(node_map.get(str(node_id), {}))
+            for node_id in candidate.get("key_assumption_node_ids", [])
+        ]
+        assumption_labels = [label for label in assumption_labels if label]
+        risk_labels = [
+            self._node_label(node_map.get(str(node_id), {}))
+            for node_id in candidate.get("risk_node_ids", [])
+        ]
+        risk_labels = [label for label in risk_labels if label]
+        next_validation_action = str(candidate.get("next_validation_action") or "").strip()
+        return {
+            "title": conclusion,
+            "summary": conclusion,
+            "conclusion": conclusion,
+            "key_supports": support_labels,
+            "assumptions": assumption_labels,
+            "risks": risk_labels,
+            "next_validation_action": next_validation_action,
+            "summary_generation_mode": "pending_llm",
+            "key_strengths": [],
+            "key_risks": [],
+            "open_questions": [],
+            "degraded": False,
+            "fallback_used": False,
+            "degraded_reason": None,
+        }
+
+    def _node_label(self, node: dict[str, object]) -> str:
+        return str(
+            node.get("short_label")
+            or node.get("label")
+            or node.get("title")
+            or node.get("description")
+            or ""
+        ).strip()

@@ -13,7 +13,7 @@ from research_layer.services.prompt_renderer import (
     render_prompt_template,
 )
 
-_MAX_ARGUMENT_UNITS = 16
+_MAX_ARGUMENT_UNITS = 32
 
 
 def _strip_code_fence(text: str) -> str:

@@ -19,7 +19,7 @@ class OntologyPromptRenderResult:
 
 def load_prompt_template(file_name: str) -> str:
     path = PROMPT_DIR / file_name
-    return path.read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8").lstrip("\ufeff")
 
 
 def render_prompt_template(template: str, variables: dict[str, object]) -> str:

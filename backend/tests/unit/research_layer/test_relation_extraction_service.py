@@ -147,6 +147,7 @@ async def test_relation_prompt_limits_output_to_explicit_edges() -> None:
             {"unit_id": "u2", "semantic_type": "evidence", "text": "Evidence"},
         ],
         chunk_text="Evidence supports the claim.",
+        paper_map_json='{"main_contributions":[{"quote":"Claim"}]}',
         max_tokens=256,
         timeout_s=30,
         failure_mode=None,
@@ -157,6 +158,8 @@ async def test_relation_prompt_limits_output_to_explicit_edges() -> None:
     assert "at most 36" in prompt_text
     assert "EXTRACTED" in prompt_text
     assert "INFERRED" in prompt_text
+    assert "paper_map_json" in prompt_text
+    assert "main_contributions" in prompt_text
 
 
 @pytest.mark.asyncio

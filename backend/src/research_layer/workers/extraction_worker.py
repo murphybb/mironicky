@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
+import asyncio
+import hashlib
 from json import JSONDecodeError
 from types import SimpleNamespace
 
@@ -48,11 +50,24 @@ _DEFAULT_EXTRACTION_MAX_INPUT_SEGMENTS = 400
 _DEFAULT_EXTRACTION_MAX_OUTPUT_TOKENS = 12000
 _DEFAULT_EXTRACTION_LLM_TIMEOUT_SECONDS = 300
 _DEFAULT_DOCUMENT_READER_MAX_OUTPUT_TOKENS = 1800
-_DEFAULT_SOURCE_CHUNK_MAX_CHARS = 50000
-_DEFAULT_SOURCE_CHUNK_MAX_SEGMENTS = 1000
+_DEFAULT_SOURCE_CHUNK_MAX_CHARS = 8000
+_DEFAULT_SOURCE_CHUNK_MAX_SEGMENTS = 8
 _MIN_EXTRACTION_CANDIDATE_COUNT = 3
 _MIN_EXTRACTION_TYPE_DIVERSITY = 2
 _MAX_CANDIDATE_TEXT_CHARS = 220
+_PAPER_MAP_FOCUS_KEYS = (
+    "route_seed_candidates",
+    "hypotheses_or_claims",
+    "main_contributions",
+    "research_questions",
+    "method_chain",
+    "data_or_corpus",
+    "experiments_or_validation",
+    "results_or_findings",
+    "limitations_or_open_questions",
+)
+_MAX_PAPER_MAP_FOCUS_QUOTES = 24
+_MIN_PAPER_MAP_FOCUS_QUOTE_CHARS = 12
 
 
 def _strip_llm_json_fence(text: str) -> str:
@@ -236,6 +251,12 @@ class ExtractionWorker:
                     parsed=parsed,
                     failure_mode=failure_mode,
                 )
+                if document_reading_memo:
+                    self._persist_paper_map_artifact(
+                        workspace_id=workspace_id,
+                        source_id=source_id,
+                        document_reading_memo=document_reading_memo,
+                    )
                 self._store.emit_event(
                     event_name="candidate_extraction_progress",
                     request_id=request_id,
@@ -249,194 +270,41 @@ class ExtractionWorker:
                     refs={"candidate_batch_id": batch_id},
                 )
                 backend, model = resolve_research_backend_and_model()
-                for chunk in chunk_plan.chunks:
-                    self._store.emit_event(
-                        event_name="candidate_extraction_progress",
-                        request_id=request_id,
-                        job_id=job_id,
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        candidate_batch_id=batch_id,
-                        component="extraction_worker",
-                        step="argument_unit_extraction",
-                        status="started",
-                        refs={
-                            "candidate_batch_id": batch_id,
-                            "chunk_id": chunk.chunk_id,
-                        },
-                        metrics={
-                            "chunk_index": chunk.chunk_index,
-                            "chunk_count": len(chunk_plan.chunks),
-                        },
-                    )
-                    try:
-                        units, mapped_candidates, unit_trace = (
-                            await self._extract_argument_units_for_chunk(
-                                request_id=request_id,
-                                workspace_id=workspace_id,
-                                source=source,
-                                parsed=parsed,
-                                chunk=chunk,
-                                document_reading_memo=document_reading_memo,
-                                failure_mode=failure_mode,
-                                backend=backend,
-                                model=model,
-                            )
-                        )
-                    except ResearchLLMError as exc:
+                chunks_for_extraction = list(chunk_plan.chunks)
+                paper_map_focus_chunk = self._build_paper_map_focus_chunk(
+                    source_id=str(source["source_id"]),
+                    parsed=parsed,
+                    document_reading_memo=document_reading_memo,
+                    chunk_index=len(chunks_for_extraction),
+                )
+                if paper_map_focus_chunk is not None:
+                    chunks_for_extraction.append(paper_map_focus_chunk)
+                chunk_results = await self._extract_chunks_for_plan(
+                    request_id=request_id,
+                    job_id=job_id,
+                    workspace_id=workspace_id,
+                    source=source,
+                    parsed=parsed,
+                    batch_id=batch_id,
+                    chunks=chunks_for_extraction,
+                    chunk_count=len(chunks_for_extraction),
+                    document_reading_memo=document_reading_memo,
+                    failure_mode=failure_mode,
+                    backend=backend,
+                    model=model,
+                )
+                for chunk_result in chunk_results:
+                    raw_candidates.extend(chunk_result["candidates"])
+                    raw_relations.extend(chunk_result["relations"])
+                    trace = chunk_result.get("trace")
+                    if trace is not None:
+                        latest_trace = trace
+                    if chunk_result.get("error_code"):
                         degraded = True
-                        degraded_reason = degraded_reason or exc.error_code
+                        degraded_reason = degraded_reason or str(
+                            chunk_result.get("error_code")
+                        )
                         partial_failure_count += 1
-                        self._store.emit_event(
-                            event_name="candidate_extraction_progress",
-                            request_id=request_id,
-                            job_id=job_id,
-                            workspace_id=workspace_id,
-                            source_id=source_id,
-                            candidate_batch_id=batch_id,
-                            component="extraction_worker",
-                            step="argument_unit_extraction",
-                            status="failed",
-                            refs={
-                                "candidate_batch_id": batch_id,
-                                "chunk_id": chunk.chunk_id,
-                            },
-                            metrics={
-                                "chunk_index": chunk.chunk_index,
-                                "chunk_count": len(chunk_plan.chunks),
-                            },
-                            error={
-                                "error_code": exc.error_code,
-                                "message": exc.message,
-                                "details": exc.details,
-                            },
-                        )
-                        continue
-                    if chunk.chunk_index == 0:
-                        explicit_candidates = self._build_explicit_paper_claim_candidates(
-                            source=source,
-                            parsed=parsed,
-                            request_id=request_id,
-                        )
-                        mapped_candidates.extend(explicit_candidates)
-                        units.extend(
-                            self._explicit_candidates_to_argument_units(
-                                explicit_candidates
-                            )
-                        )
-                    raw_candidates.extend(mapped_candidates)
-                    if unit_trace is not None:
-                        latest_trace = unit_trace
-                    self._store.emit_event(
-                        event_name="candidate_extraction_progress",
-                        request_id=request_id,
-                        job_id=job_id,
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        candidate_batch_id=batch_id,
-                        component="extraction_worker",
-                        step="argument_unit_extraction",
-                        status="completed",
-                        refs={
-                            "candidate_batch_id": batch_id,
-                            "chunk_id": chunk.chunk_id,
-                        },
-                        metrics={
-                            "chunk_index": chunk.chunk_index,
-                            "chunk_count": len(chunk_plan.chunks),
-                            "unit_count": len(units),
-                            "candidate_count": len(mapped_candidates),
-                        },
-                    )
-                    if not units:
-                        continue
-                    self._store.emit_event(
-                        event_name="candidate_extraction_progress",
-                        request_id=request_id,
-                        job_id=job_id,
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        candidate_batch_id=batch_id,
-                        component="extraction_worker",
-                        step="argument_relation_rebuild",
-                        status="started",
-                        refs={
-                            "candidate_batch_id": batch_id,
-                            "chunk_id": chunk.chunk_id,
-                        },
-                        metrics={
-                            "chunk_index": chunk.chunk_index,
-                            "chunk_count": len(chunk_plan.chunks),
-                            "unit_count": len(units),
-                        },
-                    )
-                    try:
-                        relations, relation_trace = await RelationExtractionService(
-                            self._gateway
-                        ).rebuild_relations(
-                            request_id=request_id,
-                            workspace_id=workspace_id,
-                            source_id=str(source["source_id"]),
-                            units=units,
-                            chunk_text=chunk.text,
-                            max_tokens=self._resolve_output_max_tokens(),
-                            timeout_s=self._resolve_llm_timeout_seconds(),
-                            failure_mode=failure_mode,
-                            backend=backend,
-                            model=model,
-                        )
-                    except ResearchLLMError as exc:
-                        degraded = True
-                        degraded_reason = degraded_reason or exc.error_code
-                        partial_failure_count += 1
-                        self._store.emit_event(
-                            event_name="candidate_extraction_progress",
-                            request_id=request_id,
-                            job_id=job_id,
-                            workspace_id=workspace_id,
-                            source_id=source_id,
-                            candidate_batch_id=batch_id,
-                            component="extraction_worker",
-                            step="argument_relation_rebuild",
-                            status="failed",
-                            refs={
-                                "candidate_batch_id": batch_id,
-                                "chunk_id": chunk.chunk_id,
-                            },
-                            metrics={
-                                "chunk_index": chunk.chunk_index,
-                                "chunk_count": len(chunk_plan.chunks),
-                                "unit_count": len(units),
-                            },
-                            error={
-                                "error_code": exc.error_code,
-                                "message": exc.message,
-                                "details": exc.details,
-                            },
-                        )
-                        continue
-                    raw_relations.extend(relations)
-                    latest_trace = relation_trace
-                    self._store.emit_event(
-                        event_name="candidate_extraction_progress",
-                        request_id=request_id,
-                        job_id=job_id,
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        candidate_batch_id=batch_id,
-                        component="extraction_worker",
-                        step="argument_relation_rebuild",
-                        status="completed",
-                        refs={
-                            "candidate_batch_id": batch_id,
-                            "chunk_id": chunk.chunk_id,
-                        },
-                        metrics={
-                            "chunk_index": chunk.chunk_index,
-                            "chunk_count": len(chunk_plan.chunks),
-                            "relation_count": len(relations),
-                        },
-                    )
             except ResearchLLMError as exc:
                 if allow_fallback and exc.error_code in _EXTRACTION_FALLBACK_ALLOWED_ERRORS:
                     fallback_used = True
@@ -596,7 +464,9 @@ class ExtractionWorker:
             metrics["fallback_used"] = bool(metrics.get("fallback_used") or fallback_used)
             metrics["degraded"] = bool(metrics.get("degraded") or degraded)
             if "chunk_plan" in locals():
-                metrics["chunk_count"] = len(chunk_plan.chunks)
+                metrics["chunk_count"] = len(
+                    chunks_for_extraction if "chunks_for_extraction" in locals() else chunk_plan.chunks
+                )
             if degraded_reason:
                 metrics["degraded_reason"] = degraded_reason
             metrics["partial_failure_count"] = partial_failure_count
@@ -801,6 +671,219 @@ class ExtractionWorker:
             )
         return candidates
 
+    async def _extract_chunks_for_plan(
+        self,
+        *,
+        request_id: str,
+        job_id: str,
+        workspace_id: str,
+        source: dict[str, object],
+        parsed: ParsedSource,
+        batch_id: str,
+        chunks: list[SourceChunk],
+        chunk_count: int,
+        document_reading_memo: dict[str, object] | None,
+        failure_mode: str | None,
+        backend: str | None,
+        model: str | None,
+    ) -> list[dict[str, object]]:
+        semaphore = asyncio.Semaphore(self._resolve_chunk_concurrency())
+
+        async def process_chunk(chunk: SourceChunk) -> dict[str, object]:
+            async with semaphore:
+                self._store.emit_event(
+                    event_name="candidate_extraction_progress",
+                    request_id=request_id,
+                    job_id=job_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    candidate_batch_id=batch_id,
+                    component="extraction_worker",
+                    step="argument_unit_extraction",
+                    status="started",
+                    refs={"candidate_batch_id": batch_id, "chunk_id": chunk.chunk_id},
+                    metrics={
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_count": chunk_count,
+                    },
+                )
+                try:
+                    units, mapped_candidates, unit_trace = (
+                        await self._extract_argument_units_for_chunk(
+                            request_id=request_id,
+                            workspace_id=workspace_id,
+                            source=source,
+                            parsed=parsed,
+                            chunk=chunk,
+                            document_reading_memo=document_reading_memo,
+                            failure_mode=failure_mode,
+                            backend=backend,
+                            model=model,
+                        )
+                    )
+                except ResearchLLMError as exc:
+                    self._store.emit_event(
+                        event_name="candidate_extraction_progress",
+                        request_id=request_id,
+                        job_id=job_id,
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                        candidate_batch_id=batch_id,
+                        component="extraction_worker",
+                        step="argument_unit_extraction",
+                        status="failed",
+                        refs={
+                            "candidate_batch_id": batch_id,
+                            "chunk_id": chunk.chunk_id,
+                        },
+                        metrics={
+                            "chunk_index": chunk.chunk_index,
+                            "chunk_count": chunk_count,
+                        },
+                        error={
+                            "error_code": exc.error_code,
+                            "message": exc.message,
+                            "details": exc.details,
+                        },
+                    )
+                    return {
+                        "chunk_index": chunk.chunk_index,
+                        "candidates": [],
+                        "relations": [],
+                        "trace": None,
+                        "error_code": exc.error_code,
+                    }
+
+                self._store.emit_event(
+                    event_name="candidate_extraction_progress",
+                    request_id=request_id,
+                    job_id=job_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    candidate_batch_id=batch_id,
+                    component="extraction_worker",
+                    step="argument_unit_extraction",
+                    status="completed",
+                    refs={"candidate_batch_id": batch_id, "chunk_id": chunk.chunk_id},
+                    metrics={
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_count": chunk_count,
+                        "unit_count": len(units),
+                        "candidate_count": len(mapped_candidates),
+                    },
+                )
+                if not units:
+                    return {
+                        "chunk_index": chunk.chunk_index,
+                        "candidates": mapped_candidates,
+                        "relations": [],
+                        "trace": unit_trace,
+                        "error_code": None,
+                    }
+
+                self._store.emit_event(
+                    event_name="candidate_extraction_progress",
+                    request_id=request_id,
+                    job_id=job_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    candidate_batch_id=batch_id,
+                    component="extraction_worker",
+                    step="argument_relation_rebuild",
+                    status="started",
+                    refs={"candidate_batch_id": batch_id, "chunk_id": chunk.chunk_id},
+                    metrics={
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_count": chunk_count,
+                        "unit_count": len(units),
+                    },
+                )
+                try:
+                    relations, relation_trace = await RelationExtractionService(
+                        self._gateway
+                    ).rebuild_relations(
+                        request_id=request_id,
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                        units=units,
+                        chunk_text=chunk.text,
+                        paper_map_json=json.dumps(
+                            document_reading_memo or {}, ensure_ascii=False
+                        ),
+                        max_tokens=self._resolve_output_max_tokens(),
+                        timeout_s=self._resolve_llm_timeout_seconds(),
+                        failure_mode=failure_mode,
+                        backend=backend,
+                        model=model,
+                    )
+                except ResearchLLMError as exc:
+                    self._store.emit_event(
+                        event_name="candidate_extraction_progress",
+                        request_id=request_id,
+                        job_id=job_id,
+                        workspace_id=workspace_id,
+                        source_id=str(source["source_id"]),
+                        candidate_batch_id=batch_id,
+                        component="extraction_worker",
+                        step="argument_relation_rebuild",
+                        status="failed",
+                        refs={
+                            "candidate_batch_id": batch_id,
+                            "chunk_id": chunk.chunk_id,
+                        },
+                        metrics={
+                            "chunk_index": chunk.chunk_index,
+                            "chunk_count": chunk_count,
+                            "unit_count": len(units),
+                        },
+                        error={
+                            "error_code": exc.error_code,
+                            "message": exc.message,
+                            "details": exc.details,
+                        },
+                    )
+                    return {
+                        "chunk_index": chunk.chunk_index,
+                        "candidates": mapped_candidates,
+                        "relations": [],
+                        "trace": unit_trace,
+                        "error_code": exc.error_code,
+                    }
+
+                self._store.emit_event(
+                    event_name="candidate_extraction_progress",
+                    request_id=request_id,
+                    job_id=job_id,
+                    workspace_id=workspace_id,
+                    source_id=str(source["source_id"]),
+                    candidate_batch_id=batch_id,
+                    component="extraction_worker",
+                    step="argument_relation_rebuild",
+                    status="completed",
+                    refs={"candidate_batch_id": batch_id, "chunk_id": chunk.chunk_id},
+                    metrics={
+                        "chunk_index": chunk.chunk_index,
+                        "chunk_count": chunk_count,
+                        "relation_count": len(relations),
+                    },
+                )
+                return {
+                    "chunk_index": chunk.chunk_index,
+                    "candidates": mapped_candidates,
+                    "relations": relations,
+                    "trace": relation_trace,
+                    "error_code": None,
+                }
+
+        results = await asyncio.gather(*(process_chunk(chunk) for chunk in chunks))
+        return sorted(results, key=lambda result: int(result["chunk_index"]))
+
+    def _resolve_chunk_concurrency(self) -> int:
+        return min(
+            8,
+            _read_positive_int_env("RESEARCH_SOURCE_EXTRACT_CHUNK_CONCURRENCY", 4),
+        )
+
     async def _extract_argument_units_for_chunk(
         self,
         *,
@@ -815,7 +898,8 @@ class ExtractionWorker:
         model: str | None,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], LLMCallResult | None]:
         source_id = str(source["source_id"])
-        cache_key = "candidate:argument_unit_extractor:v9_explicit_claim_relation_units"
+        paper_map_hash = self._paper_map_cache_hash(document_reading_memo)
+        cache_key = f"candidate:argument_unit_extractor:v10_paper_map_units:{paper_map_hash}"
         cached = self._store.get_source_chunk_cache(
             workspace_id=workspace_id,
             source_id=source_id,
@@ -875,9 +959,22 @@ class ExtractionWorker:
             source_id=source_id,
             chunk_hash=chunk.chunk_hash,
             cache_key=cache_key,
-            payload={"units": units, "candidates": mapped},
+            payload={
+                "paper_map_hash": paper_map_hash,
+                "units": units,
+                "candidates": mapped,
+            },
         )
         return units, mapped, trace
+
+    def _paper_map_cache_hash(self, document_reading_memo: dict[str, object] | None) -> str:
+        serialized = json.dumps(
+            document_reading_memo or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
     def _build_source_span(
         self,
@@ -958,6 +1055,142 @@ class ExtractionWorker:
                 }
             )
         return artifacts
+
+    def _persist_paper_map_artifact(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        document_reading_memo: dict[str, object],
+    ) -> None:
+        existing_artifacts = [
+            artifact
+            for artifact in self._store.list_source_artifacts(
+                workspace_id=workspace_id, source_id=source_id
+            )
+            if str(artifact.get("artifact_type") or "") != "paper_map"
+        ]
+        paper_map_artifact = {
+            "artifact_id": f"art_{source_id}_paper_map",
+            "workspace_id": workspace_id,
+            "source_id": source_id,
+            "artifact_type": "paper_map",
+            "anchor_id": "paper_map",
+            "page": None,
+            "block_id": None,
+            "paragraph_id": None,
+            "section_path": [],
+            "content": json.dumps(document_reading_memo, ensure_ascii=False),
+            "locator": {"anchor_id": "paper_map"},
+            "metadata": {
+                "schema": "paper_map_v1",
+                "prompt_name": "extraction_document_reader",
+            },
+        }
+        self._store.replace_source_artifacts(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            artifacts=[*existing_artifacts, paper_map_artifact],
+        )
+
+    def _build_paper_map_focus_chunk(
+        self,
+        *,
+        source_id: str,
+        parsed: ParsedSource,
+        document_reading_memo: dict[str, object] | None,
+        chunk_index: int,
+    ) -> SourceChunk | None:
+        focus_items = self._collect_source_grounded_paper_map_items(
+            parsed=parsed,
+            document_reading_memo=document_reading_memo,
+        )
+        if not focus_items:
+            return None
+
+        lines = [
+            "PaperMap focus anchors. Extract argument units from these source-grounded quotes only.",
+        ]
+        current_key = ""
+        for item in focus_items:
+            key = str(item["key"])
+            if key != current_key:
+                current_key = key
+                lines.append(f"\n[{key}]")
+            quote = str(item["quote"])
+            reason = str(item.get("reason") or "").strip()
+            section = str(item.get("section") or "").strip()
+            suffix_parts = []
+            if section:
+                suffix_parts.append(f"section={section}")
+            if reason:
+                suffix_parts.append(f"reason={reason}")
+            suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+            lines.append(f"- {quote}{suffix}")
+
+        text = "\n".join(lines).strip()
+        return SourceChunk(
+            chunk_id=f"{source_id}:paper_map_focus",
+            chunk_index=chunk_index,
+            section_hint="paper_map_focus",
+            start=0,
+            end=len(parsed.normalized_content),
+            text=text,
+            chunk_hash=hashlib.sha1(text.encode("utf-8")).hexdigest()[:16],
+        )
+
+    def _collect_source_grounded_paper_map_items(
+        self,
+        *,
+        parsed: ParsedSource,
+        document_reading_memo: dict[str, object] | None,
+    ) -> list[dict[str, str]]:
+        if not isinstance(document_reading_memo, dict):
+            return []
+
+        items: list[dict[str, str]] = []
+        seen_quotes: set[str] = set()
+        for key in _PAPER_MAP_FOCUS_KEYS:
+            raw_items = document_reading_memo.get(key)
+            if not isinstance(raw_items, list):
+                continue
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                quote = str(raw_item.get("quote") or "").strip()
+                if not self._paper_map_quote_is_source_grounded(parsed=parsed, quote=quote):
+                    continue
+                normalized_quote = self._normalize_for_source_match(quote)
+                if normalized_quote in seen_quotes:
+                    continue
+                seen_quotes.add(normalized_quote)
+                item = {
+                    "key": key,
+                    "quote": quote,
+                    "reason": str(raw_item.get("reason") or "").strip(),
+                    "section": str(raw_item.get("section") or "").strip(),
+                }
+                items.append(item)
+                if len(items) >= _MAX_PAPER_MAP_FOCUS_QUOTES:
+                    return items
+        return items
+
+    def _paper_map_quote_is_source_grounded(
+        self, *, parsed: ParsedSource, quote: str
+    ) -> bool:
+        normalized_quote = self._normalize_for_source_match(quote)
+        if len(normalized_quote) < _MIN_PAPER_MAP_FOCUS_QUOTE_CHARS:
+            return False
+        normalized_content = self._normalize_for_source_match(parsed.normalized_content)
+        if normalized_quote.lower() in normalized_content.lower():
+            return True
+
+        compact_quote = re.sub(r"\s+", "", normalized_quote)
+        compact_content = re.sub(r"\s+", "", normalized_content)
+        return bool(compact_quote and compact_quote.lower() in compact_content.lower())
+
+    def _normalize_for_source_match(self, text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip())
 
     def _classify_source_artifact(self, text: str) -> str:
         stripped = text.strip()
@@ -1372,7 +1605,7 @@ class ExtractionWorker:
         prompt_template = load_prompt_template("document_reader_prompt.txt")
         prompt = render_prompt_template(
             prompt_template,
-            {"chunk_text": self._build_prompt_chunk(parsed)},
+            {"chunk_text": self._build_document_reader_prompt_chunk(parsed)},
         )
         backend, model = resolve_research_backend_and_model()
         result = await self._gateway.invoke_text(
@@ -1438,6 +1671,15 @@ class ExtractionWorker:
         self, payload: dict[str, object]
     ) -> dict[str, object]:
         summary = str(payload.get("document_summary") or "").strip()
+        document_type = str(payload.get("document_type") or "unknown").strip().lower()
+        if document_type not in {
+            "academic_paper",
+            "technical_report",
+            "event_report",
+            "notes",
+            "unknown",
+        }:
+            document_type = "unknown"
         domain_profile = (
             [
                 str(item).strip()
@@ -1451,6 +1693,23 @@ class ExtractionWorker:
         if not isinstance(raw_hints, dict):
             raw_hints = payload.get("candidate_hints")
         hints = raw_hints if isinstance(raw_hints, dict) else {}
+
+        def normalize_items(raw_items: object, *, limit: int = 4) -> list[dict[str, str]]:
+            items: list[dict[str, str]] = []
+            if isinstance(raw_items, list):
+                for raw_item in raw_items[:limit]:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    quote = str(raw_item.get("quote") or "").strip()
+                    reason = str(raw_item.get("reason") or "").strip()
+                    section = str(raw_item.get("section") or "").strip()
+                    if quote:
+                        item = {"quote": quote, "reason": reason}
+                        if section:
+                            item["section"] = section
+                        items.append(item)
+            return items
+
         normalized_hints: dict[str, list[dict[str, str]]] = {}
         for hint_type in (
             "concepts",
@@ -1467,24 +1726,38 @@ class ExtractionWorker:
             "failure",
             "validation",
         ):
-            raw_items = hints.get(hint_type)
-            items: list[dict[str, str]] = []
-            if isinstance(raw_items, list):
-                for raw_item in raw_items[:4]:
-                    if not isinstance(raw_item, dict):
-                        continue
-                    quote = str(raw_item.get("quote") or "").strip()
-                    reason = str(raw_item.get("reason") or "").strip()
-                    section = str(raw_item.get("section") or "").strip()
-                    if quote:
-                        item = {"quote": quote, "reason": reason}
-                        if section:
-                            item["section"] = section
-                        items.append(item)
-            normalized_hints[hint_type] = items
+            normalized_hints[hint_type] = normalize_items(hints.get(hint_type))
+
+        paper_map_keys = (
+            "research_questions",
+            "main_contributions",
+            "hypotheses_or_claims",
+            "method_chain",
+            "data_or_corpus",
+            "experiments_or_validation",
+            "results_or_findings",
+            "limitations_or_open_questions",
+            "artifact_index",
+            "route_seed_candidates",
+        )
+        paper_map = {
+            key: normalize_items(payload.get(key), limit=3) for key in paper_map_keys
+        }
+        coverage_warnings = (
+            [
+                str(item).strip()
+                for item in (payload.get("coverage_warnings") or [])
+                if str(item).strip()
+            ]
+            if isinstance(payload.get("coverage_warnings"), list)
+            else []
+        )
         return {
             "document_summary": summary,
+            "document_type": document_type,
             "domain_profile": domain_profile,
+            **paper_map,
+            "coverage_warnings": coverage_warnings[:6],
             "structure_hints": normalized_hints,
         }
 
@@ -1716,104 +1989,6 @@ class ExtractionWorker:
 
         return supplemental
 
-    def _build_explicit_paper_claim_candidates(
-        self,
-        *,
-        source: dict[str, object],
-        parsed: ParsedSource,
-        request_id: str,
-    ) -> list[dict[str, object]]:
-        if str(source.get("source_type") or parsed.source_type) != "paper":
-            return []
-
-        content = parsed.normalized_content
-        candidates: list[dict[str, object]] = []
-
-        def add_candidate(candidate_type: str, raw_text: str, semantic_type: str) -> None:
-            text = re.sub(r"\s+", " ", str(raw_text or "").strip())
-            if len(text) < 12:
-                return
-            start, end, span_text = self._resolve_source_span(
-                parsed=parsed,
-                primary_query=raw_text,
-                secondary_query=text,
-            )
-            if start < 0 or not span_text:
-                return
-            candidates.append(
-                {
-                    "candidate_type": candidate_type,
-                    "semantic_type": semantic_type,
-                    "text": self._normalize_candidate_text(text),
-                    "source_span": {"start": start, "end": end, "text": span_text},
-                    "quote": span_text,
-                    "extractor_name": "deterministic_explicit_paper_claim_extractor",
-                    "provider_backend": self._resolve_backend_hint(),
-                    "provider_model": "deterministic_parser",
-                    "request_id": request_id,
-                    "llm_response_id": request_id,
-                    "usage": _normalized_usage(None),
-                    "fallback_used": False,
-                    "degraded": False,
-                    "degraded_reason": None,
-                    "trace_refs": {
-                        "semantic_type": semantic_type,
-                        "extraction_rule": "explicit_paper_claim",
-                    },
-                }
-            )
-
-        for match in re.finditer(r"\bH\d+\s*[:：]\s*[^。！？!?]{8,260}[。！？!?]?", content):
-            add_candidate("assumption", match.group(0), "hypothesis")
-
-        conclusion_start = content.find("结论及启示")
-        if conclusion_start < 0:
-            conclusion_start = content.find("最终得出以下结论")
-        if conclusion_start >= 0:
-            conclusion_text = content[conclusion_start : conclusion_start + 2600]
-            for match in re.finditer(
-                r"(?:第一|第二|第三)[，,、]\s*.{20,420}?(?=(?:第二|第三)[，,、]|（二）|\(二\)|管理启示|研究表明|$)",
-                conclusion_text,
-            ):
-                add_candidate("conclusion", match.group(0), "conclusion")
-            for match in re.finditer(r"研究表明.{20,420}?竞争优势。", conclusion_text):
-                add_candidate("conclusion", match.group(0), "conclusion")
-
-        return candidates
-
-    def _explicit_candidates_to_argument_units(
-        self, candidates: list[dict[str, object]]
-    ) -> list[dict[str, object]]:
-        units: list[dict[str, object]] = []
-        for index, candidate in enumerate(candidates, start=1):
-            trace_refs = candidate.get("trace_refs")
-            if not isinstance(trace_refs, dict):
-                trace_refs = {}
-                candidate["trace_refs"] = trace_refs
-            unit_id = str(trace_refs.get("argument_unit_id") or "").strip()
-            if not unit_id:
-                unit_id = f"explicit_paper_claim_{index}"
-                trace_refs["argument_unit_id"] = unit_id
-            semantic_type = str(candidate.get("semantic_type") or "").strip()
-            candidate_type = str(candidate.get("candidate_type") or "").strip()
-            text = str(candidate.get("text") or "").strip()
-            quote = str(candidate.get("quote") or text).strip()
-            units.append(
-                {
-                    "unit_id": unit_id,
-                    "semantic_type": semantic_type,
-                    "candidate_type": candidate_type,
-                    "text": text,
-                    "normalized_label": text[:60],
-                    "domain_profile": ["social_science"],
-                    "domain_tags": [semantic_type] if semantic_type else [],
-                    "confidence_score": 1.0,
-                    "quote": quote,
-                    "anchor": {},
-                }
-            )
-        return units
-
     def _normalize_candidate_text(self, raw_text: str) -> str:
         normalized = re.sub(r"\s+", " ", str(raw_text or "").strip())
         if not normalized:
@@ -1978,10 +2153,6 @@ class ExtractionWorker:
 
     def _dedupe_preference(self, candidate: dict[str, object]) -> int:
         score = 0
-        if str(candidate.get("extractor_name") or "") == (
-            "deterministic_explicit_paper_claim_extractor"
-        ):
-            score += 100
         if str(candidate.get("candidate_type") or "") == "assumption":
             score += 20
         if str(candidate.get("semantic_type") or "") == "hypothesis":
@@ -2045,6 +2216,55 @@ class ExtractionWorker:
         if selected_segments:
             return " ".join(selected_segments)
         return parsed.normalized_content[:max_chars].strip()
+
+    def _build_document_reader_prompt_chunk(self, parsed: ParsedSource) -> str:
+        max_chars = _read_positive_int_env(
+            "RESEARCH_SOURCE_EXTRACT_MAX_INPUT_CHARS",
+            _DEFAULT_EXTRACTION_MAX_INPUT_CHARS,
+        )
+        max_segments = _read_positive_int_env(
+            "RESEARCH_SOURCE_EXTRACT_MAX_INPUT_SEGMENTS",
+            _DEFAULT_EXTRACTION_MAX_INPUT_SEGMENTS,
+        )
+        segments = [segment.text.strip() for segment in parsed.segments if segment.text.strip()]
+        if not segments:
+            return parsed.normalized_content[:max_chars].strip()
+        if len(" ".join(segments)) <= max_chars and len(segments) <= max_segments:
+            return " ".join(segments)
+
+        head_budget = max(1, max_segments // 3)
+        tail_budget = max(1, max_segments // 3)
+        priority_budget = max(1, max_segments - head_budget - tail_budget)
+        priority_pattern = re.compile(
+            r"(abstract|introduction|method|experiment|result|discussion|conclusion|"
+            r"limitation|future|hypothesis|\bH\s*\d+\b|"
+            r"摘要|引言|方法|实验|结果|讨论|结论|局限|未来|假设|研究问题|研究结论)",
+            flags=re.IGNORECASE,
+        )
+        selected: list[tuple[str, list[str]]] = []
+        selected.append(("document opening", segments[:head_budget]))
+        priority_segments = [
+            text
+            for text in segments[head_budget : max(0, len(segments) - tail_budget)]
+            if priority_pattern.search(text)
+        ][:priority_budget]
+        if priority_segments:
+            selected.append(("document priority excerpts", priority_segments))
+        selected.append(("document ending", segments[-tail_budget:]))
+
+        budget_per_section = max(60, max_chars // max(1, len(selected)))
+        parts: list[str] = []
+        for title, section_segments in selected:
+            section_text = " ".join(section_segments).strip()
+            if not section_text:
+                continue
+            if len(section_text) > budget_per_section:
+                section_text = section_text[:budget_per_section].rstrip()
+            parts.append(f"[{title}] {section_text}")
+        prompt_chunk = "\n".join(parts).strip()
+        if len(prompt_chunk) <= max_chars:
+            return prompt_chunk
+        return prompt_chunk[:max_chars].rstrip()
 
     def _resolve_output_max_tokens(self) -> int:
         return _read_positive_int_env(

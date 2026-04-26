@@ -2,9 +2,32 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-_PRIMARY_ROUTE_NODE_TYPES = {"assumption", "conclusion", "validation", "branch", "gap"}
+_PRIMARY_ROUTE_NODE_TYPES = {"conclusion", "validation", "branch"}
+_SUPPORT_NODE_TYPES = {"evidence", "validation"}
 _RISK_NODE_TYPES = {"conflict", "failure"}
+_OPEN_QUESTION_NODE_TYPES = {"gap"}
 _INACTIVE_STATUSES = {"archived", "superseded"}
+_NON_CLAIM_ASSUMPTION_TAGS = {"condition"}
+_RESULT_EVIDENCE_TAGS = {
+    "claim",
+    "conclusion",
+    "finding",
+    "main_contribution",
+    "outcome",
+    "result",
+}
+_SOURCE_CONTEXT_SUPPORT_TAGS = {
+    "dataset",
+    "evidence",
+    "experiment",
+    "intervention",
+    "method",
+    "metric",
+    "population",
+    "result",
+    "sample",
+    "validation",
+}
 
 
 class RouteCandidateBuilder:
@@ -45,23 +68,14 @@ class RouteCandidateBuilder:
             edge_ids_by_node_pair[(target, source)].append(edge_id)
 
         conclusion_nodes = [
-            node
-            for node in graph_nodes
-            if str(node.get("node_type", "")) in _PRIMARY_ROUTE_NODE_TYPES
-            and str(node.get("status", "")) not in _INACTIVE_STATUSES
+            node for node in graph_nodes if self._is_primary_route_seed(node)
         ]
         if not conclusion_nodes:
             conclusion_nodes = [
                 node
                 for node in graph_nodes
-                if str(node.get("node_type", "")) not in _RISK_NODE_TYPES
+                if str(node.get("node_type", "")) in _RISK_NODE_TYPES
                 and str(node.get("status", "")) not in _INACTIVE_STATUSES
-            ]
-        if not conclusion_nodes:
-            conclusion_nodes = [
-                node
-                for node in graph_nodes
-                if str(node.get("status", "")) not in _INACTIVE_STATUSES
             ]
 
         seen_signatures: set[tuple[str, ...]] = set()
@@ -77,6 +91,11 @@ class RouteCandidateBuilder:
             route_node_ids = self._collect_route_node_ids(
                 conclusion_node_id=conclusion_node_id, adjacency=adjacency
             )
+            route_node_ids = self._add_source_context_node_ids(
+                conclusion_node=conclusion_node,
+                graph_nodes=graph_nodes,
+                route_node_ids=route_node_ids,
+            )
             signature = tuple(route_node_ids)
             if signature in seen_signatures:
                 continue
@@ -88,8 +107,9 @@ class RouteCandidateBuilder:
             key_support_node_ids = [
                 str(node["node_id"])
                 for node in route_nodes
-                if str(node.get("node_type")) == "evidence"
+                if self._is_support_node(node)
                 and str(node.get("status", "")) != "failed"
+                and str(node["node_id"]) != conclusion_node_id
             ][:3]
             key_assumption_node_ids = [
                 str(node["node_id"])
@@ -99,9 +119,15 @@ class RouteCandidateBuilder:
             risk_node_ids = [
                 str(node["node_id"])
                 for node in route_nodes
-                if str(node.get("node_type")) in _RISK_NODE_TYPES
+                if str(node.get("node_type"))
+                in _RISK_NODE_TYPES | _OPEN_QUESTION_NODE_TYPES
                 or str(node.get("status", "")) == "failed"
             ][:3]
+            if not self._is_route_supported(
+                conclusion_node=conclusion_node,
+                key_support_node_ids=key_support_node_ids,
+            ):
+                continue
             next_validation_node_ids = [
                 str(node["node_id"])
                 for node in route_nodes
@@ -153,12 +179,12 @@ class RouteCandidateBuilder:
 
     def _route_priority(self, node: dict[str, object]) -> int:
         node_type = str(node.get("node_type", ""))
-        tags = {str(tag) for tag in node.get("short_tags", []) if str(tag).strip()}
+        tags = self._tags(node)
         if node_type == "conclusion":
             return 0
         if node_type == "assumption" and "hypothesis" in tags:
             return 1
-        if node_type == "gap":
+        if node_type == "evidence" and tags & _RESULT_EVIDENCE_TAGS:
             return 2
         if node_type == "validation":
             return 3
@@ -166,12 +192,87 @@ class RouteCandidateBuilder:
             return 4
         return 5
 
+    def _is_primary_route_seed(self, node: dict[str, object]) -> bool:
+        if str(node.get("status", "")) in _INACTIVE_STATUSES:
+            return False
+        node_type = str(node.get("node_type", ""))
+        tags = self._tags(node)
+        if node_type in _PRIMARY_ROUTE_NODE_TYPES:
+            return True
+        if node_type == "assumption":
+            return not tags or not tags <= _NON_CLAIM_ASSUMPTION_TAGS
+        if node_type == "evidence":
+            return bool(tags & _RESULT_EVIDENCE_TAGS)
+        return False
+
+    def _is_support_node(self, node: dict[str, object]) -> bool:
+        node_type = str(node.get("node_type", ""))
+        return node_type in _SUPPORT_NODE_TYPES
+
+    def _is_route_supported(
+        self,
+        *,
+        conclusion_node: dict[str, object],
+        key_support_node_ids: list[str],
+    ) -> bool:
+        node_type = str(conclusion_node.get("node_type", ""))
+        if node_type in _RISK_NODE_TYPES:
+            return True
+        if node_type in _OPEN_QUESTION_NODE_TYPES:
+            return False
+        return bool(key_support_node_ids)
+
     def _collect_route_node_ids(
         self, *, conclusion_node_id: str, adjacency: dict[str, set[str]]
     ) -> list[str]:
         neighbor_ids = sorted(adjacency.get(conclusion_node_id, set()))
         route_node_ids = sorted({conclusion_node_id, *neighbor_ids})
         return route_node_ids
+
+    def _add_source_context_node_ids(
+        self,
+        *,
+        conclusion_node: dict[str, object],
+        graph_nodes: list[dict[str, object]],
+        route_node_ids: list[str],
+    ) -> list[str]:
+        conclusion_anchors = self._source_anchor_ids(conclusion_node)
+        if not conclusion_anchors:
+            return route_node_ids
+
+        source_context_ids = [
+            str(node["node_id"])
+            for node in graph_nodes
+            if str(node.get("node_id", "")) != str(conclusion_node.get("node_id", ""))
+            and self._source_anchor_ids(node) & conclusion_anchors
+            and self._is_source_context_support(node)
+        ][:6]
+        return sorted({*route_node_ids, *source_context_ids})
+
+    def _is_source_context_support(self, node: dict[str, object]) -> bool:
+        return bool(self._tags(node) & _SOURCE_CONTEXT_SUPPORT_TAGS) and self._is_support_node(
+            node
+        )
+
+    def _source_anchor_ids(self, node: dict[str, object]) -> set[str]:
+        anchors: set[str] = set()
+        source_ref = node.get("source_ref")
+        if isinstance(source_ref, dict):
+            anchor_id = str(source_ref.get("anchor_id", "")).strip()
+            if anchor_id:
+                anchors.add(anchor_id)
+        source_refs = node.get("source_refs")
+        if isinstance(source_refs, list):
+            for item in source_refs:
+                if not isinstance(item, dict):
+                    continue
+                anchor_id = str(item.get("anchor_id", "")).strip()
+                if anchor_id:
+                    anchors.add(anchor_id)
+        return anchors
+
+    def _tags(self, node: dict[str, object]) -> set[str]:
+        return {str(tag) for tag in node.get("short_tags", []) if str(tag).strip()}
 
     def _build_adjacency(
         self, graph_edges: list[dict[str, object]]

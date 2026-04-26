@@ -116,6 +116,7 @@ class RelationExtractionService:
         failure_mode: str | None,
         backend: str | None = None,
         model: str | None = None,
+        paper_map_json: str = "{}",
     ) -> tuple[list[dict[str, object]], LLMCallResult]:
         prompt = render_prompt_template(
             load_prompt_template(self.prompt_file_name),
@@ -123,6 +124,7 @@ class RelationExtractionService:
                 "workspace_id": workspace_id,
                 "source_id": source_id,
                 "units_json": json.dumps(units, ensure_ascii=False),
+                "paper_map_json": paper_map_json,
                 "chunk_text": chunk_text,
             },
         )

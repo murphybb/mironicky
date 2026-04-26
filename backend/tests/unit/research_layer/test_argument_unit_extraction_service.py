@@ -8,6 +8,7 @@ from research_layer.services.argument_unit_extraction_service import (
     ArgumentUnitExtractionService,
 )
 from research_layer.services.llm_trace import LLMCallResult
+from research_layer.services import prompt_renderer
 
 
 class _FakeGateway:
@@ -43,6 +44,16 @@ class _FakeGateway:
             degraded=False,
             degraded_reason=None,
         )
+
+
+def test_prompt_renderer_strips_utf8_bom(monkeypatch, tmp_path) -> None:
+    prompt_path = tmp_path / "bom_prompt.txt"
+    prompt_path.write_text("\ufeffSYSTEM:\nRead the paper.", encoding="utf-8")
+    monkeypatch.setattr(prompt_renderer, "PROMPT_DIR", tmp_path)
+
+    template = prompt_renderer.load_prompt_template("bom_prompt.txt")
+
+    assert template.startswith("SYSTEM:")
 
 
 @pytest.mark.asyncio
@@ -105,8 +116,10 @@ async def test_argument_unit_prompt_limits_output_to_core_argument_units() -> No
 
     messages = gateway.kwargs["messages"]
     prompt_text = "\n".join(str(message.content) for message in messages)
-    assert "at most 16" in prompt_text
+    assert "at most 32" in prompt_text
     assert "core knowledge units" in prompt_text
+    assert "PaperMap" in prompt_text
+    assert "route_seed_candidates" in prompt_text
     assert "domain_profile" in prompt_text
     assert "hypothesis" in prompt_text
     assert "artifact_profile_json" in prompt_text
@@ -182,7 +195,7 @@ async def test_argument_unit_extractor_caps_dense_outputs() -> None:
                     "quote": f"Claim {index}",
                     "anchor": {},
                 }
-                for index in range(1, 31)
+                for index in range(1, 41)
             ]
         }
     )
@@ -204,8 +217,8 @@ async def test_argument_unit_extractor_caps_dense_outputs() -> None:
         failure_mode=None,
     )
 
-    assert len(units) == 16
-    assert units[-1]["unit_id"] == "u16"
+    assert len(units) == 32
+    assert units[-1]["unit_id"] == "u32"
 
 
 @pytest.mark.asyncio

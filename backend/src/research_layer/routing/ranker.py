@@ -25,6 +25,7 @@ class RouteRanker:
                 1,
             )
         return (
+            self._semantic_center_priority(route),
             -_as_float(confidence_score, 0.0),
             -_as_float(route.get("support_score"), 0.0),
             _as_float(route.get("risk_score"), 100.0),
@@ -32,6 +33,15 @@ class RouteRanker:
             self._private_dependency_pressure(route),
             str(route.get("route_id", "")),
         )
+
+    def _semantic_center_priority(self, route: dict[str, object]) -> float:
+        raw_tags = route.get("relation_tags")
+        tags = {str(tag) for tag in raw_tags} if isinstance(raw_tags, list) else set()
+        if "claim_centered" in tags:
+            return 0.0
+        if "evidence_centered" in tags:
+            return 1.0
+        return 0.5
 
     def _private_dependency_pressure(self, route: dict[str, object]) -> float:
         score_breakdown = route.get("score_breakdown")

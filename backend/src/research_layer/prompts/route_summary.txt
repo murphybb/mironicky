@@ -36,8 +36,17 @@ Rules:
 - all node_refs must come from {all_route_nodes_json}.
 - Do not fabricate nodes, edges, citations, evidence, assumptions, or risks not present in the input context.
 - route_edge_ids_json is canonical replay context; do not invent edge ids not present there.
+- Prefer full_description and source_quote over short_label when explaining a node.
+- Preserve technical terms from full_description and source_quote. If a term is ambiguous, keep the original English term in parentheses instead of turning it into a negative judgment. For example, weak scaling is a parallel-computing term, not evidence that performance is weak.
+- If route_edge_ids_json is empty, do not claim there are explicit graph edges or a complete edge-proven chain. Explain the route as source-linked/contextual support from the same source passage.
 - Keep summary objective, concise, and consistent with the provided route graph context.
 - Use the input node labels as evidence. Do not expose raw node ids in the summary unless there is no readable label.
+
+Node context fields:
+- short_label: compact UI label, often truncated.
+- full_description: full extracted claim or evidence text.
+- source_quote: original source quote when available.
+- source_page/source_anchor_id: provenance location when available.
 
 USER:
 route_id: {route_id}

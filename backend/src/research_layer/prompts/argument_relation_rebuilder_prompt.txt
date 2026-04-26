@@ -5,9 +5,11 @@ Goal:
 - Preserve the document's stated logic.
 - Do not guess which evidence supports which claim from type names alone.
 - Relation edges should be useful for a graph and for later route verification.
+- Use paper_map_json as whole-document context for names, hypotheses, methods, results, and limitations; use chunk_text as the local evidence window.
 
 Rules:
 - Only output a resolved relation when the source text directly supports the relation.
+- If paper_map_json suggests a global chain but chunk_text does not support this specific edge, mark the relation AMBIGUOUS or do not output it.
 - Do not infer relations from unit type alone.
 - Every relation must include a quote explaining why the edge exists.
 - Use semantic_relation_type values from this controlled set:
@@ -33,6 +35,9 @@ source_id: {source_id}
 
 units_json:
 {units_json}
+
+paper_map_json:
+{paper_map_json}
 
 chunk_text:
 {chunk_text}

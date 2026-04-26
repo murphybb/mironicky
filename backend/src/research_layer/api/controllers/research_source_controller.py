@@ -352,6 +352,32 @@ class ResearchSourceController(BaseController):
         )
         return SourceResponse.model_validate(source)
 
+    @get(
+        "/sources/{source_id}/artifacts",
+        responses={404: {"model": ErrorResponse}},
+    )
+    async def list_source_artifacts(
+        self, source_id: str, workspace_id: str = Query(...)
+    ) -> dict[str, object]:
+        workspace = validate_workspace_id(workspace_id)
+        source = STORE.get_source(source_id)
+        ensure(
+            source is not None,
+            status_code=404,
+            code=ResearchErrorCode.NOT_FOUND.value,
+            message="source not found",
+            details={"source_id": source_id},
+        )
+        ensure(
+            str(source["workspace_id"]) == workspace,
+            status_code=404,
+            code=ResearchErrorCode.NOT_FOUND.value,
+            message="source not found in workspace",
+            details={"source_id": source_id, "workspace_id": workspace},
+        )
+        items = STORE.list_source_artifacts(workspace_id=workspace, source_id=source_id)
+        return {"items": items, "total": len(items)}
+
     @post(
         "/sources/{source_id}/scholarly/lookup",
         response_model=SourceScholarlyLookupResponse,

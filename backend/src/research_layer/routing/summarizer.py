@@ -15,7 +15,7 @@ _DEFAULT_ROUTE_SUMMARY_LLM_TIMEOUT_SECONDS = 300
 
 
 def _load_prompt_template(file_name: str) -> str:
-    return (_PROMPT_DIR / file_name).read_text(encoding="utf-8")
+    return (_PROMPT_DIR / file_name).read_text(encoding="utf-8").lstrip("\ufeff")
 
 
 def _render_prompt_template(template: str, variables: dict[str, object]) -> str:
@@ -188,6 +188,10 @@ class RouteSummarizer:
                 message="route summary is empty",
                 details={},
             )
+        route_nodes = [
+            item for item in structured.get("all_route_nodes", []) if isinstance(item, dict)
+        ]
+        summary = self._replace_raw_node_ids(summary, route_nodes=route_nodes)
 
         allowed_node_ids = {
             str(item.get("node_id", ""))
@@ -197,16 +201,19 @@ class RouteSummarizer:
         key_strengths = self._validate_structured_items(
             parsed.get("key_strengths"),
             allowed_node_ids=allowed_node_ids,
+            route_nodes=route_nodes,
             field_name="key_strengths",
         )
         key_risks = self._validate_structured_items(
             parsed.get("key_risks"),
             allowed_node_ids=allowed_node_ids,
+            route_nodes=route_nodes,
             field_name="key_risks",
         )
         open_questions = self._validate_structured_items(
             parsed.get("open_questions"),
             allowed_node_ids=allowed_node_ids,
+            route_nodes=route_nodes,
             field_name="open_questions",
         )
         return {
@@ -215,6 +222,23 @@ class RouteSummarizer:
             "key_risks": key_risks,
             "open_questions": open_questions,
         }, llm_result
+
+    def _replace_raw_node_ids(
+        self, text: str, *, route_nodes: list[dict[str, object]]
+    ) -> str:
+        cleaned = text
+        replacements: list[tuple[str, str]] = []
+        for node in route_nodes:
+            node_id = str(node.get("node_id", "")).strip()
+            label = (
+                str(node.get("full_description", "")).strip()
+                or str(node.get("short_label", "")).strip()
+            )
+            if node_id and label and label != node_id:
+                replacements.append((node_id, label))
+        for node_id, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+            cleaned = cleaned.replace(node_id, label)
+        return cleaned
 
     def _build_structured_context(
         self,
@@ -257,11 +281,12 @@ class RouteSummarizer:
                 f"Validate conclusion node {conclusion_node['node_id']} with targeted experiment"
             )
 
-        conclusion_label_raw = (
-            conclusion_node.get("short_label", "").strip() or conclusion_node["node_id"]
+        conclusion_text = (
+            conclusion_node.get("full_description", "").strip()
+            or conclusion_node.get("short_label", "").strip()
+            or conclusion_node["node_id"]
         )
-        conclusion_label = self._compact_label(conclusion_label_raw, max_len=40)
-        title = f"路线：{conclusion_label}"
+        title = f"路线：{self._compact_label(conclusion_text, max_len=40)}"
         all_route_nodes = [
             self._node_ref(node_map.get(node_id), fallback_node_id=node_id)
             for node_id in route_node_ids
@@ -278,14 +303,16 @@ class RouteSummarizer:
         return {
             "title": title,
             "summary": "",
-            "conclusion": conclusion_label,
+            "conclusion": conclusion_text,
             "key_supports": [
-                item["short_label"]
+                item["full_description"] or item["short_label"]
                 for item in key_support_evidence
-                if item["short_label"]
+                if item["full_description"] or item["short_label"]
             ],
             "assumptions": [
-                item["short_label"] for item in key_assumptions if item["short_label"]
+                item["full_description"] or item["short_label"]
+                for item in key_assumptions
+                if item["full_description"] or item["short_label"]
             ],
             "risks": [item["hint"] for item in conflict_failure_hints],
             "conclusion_node": conclusion_node,
@@ -359,22 +386,55 @@ class RouteSummarizer:
                 "object_ref_type": "unknown",
                 "object_ref_id": "",
                 "short_label": fallback_node_id,
+                "full_description": "",
+                "source_quote": "",
+                "source_page": "",
+                "source_anchor_id": "",
                 "status": "unknown",
             }
+        source_quote, source_page, source_anchor_id = self._source_ref_fields(node)
         return {
             "node_id": str(node.get("node_id", fallback_node_id)),
             "node_type": str(node.get("node_type", "unknown")),
             "object_ref_type": str(node.get("object_ref_type", "unknown")),
             "object_ref_id": str(node.get("object_ref_id", "")),
             "short_label": str(node.get("short_label", "")),
+            "full_description": str(
+                node.get("full_description") or node.get("description") or ""
+            ),
+            "source_quote": source_quote,
+            "source_page": source_page,
+            "source_anchor_id": source_anchor_id,
             "status": str(node.get("status", "unknown")),
         }
+
+    def _source_ref_fields(self, node: dict[str, object]) -> tuple[str, str, str]:
+        refs: list[object] = []
+        source_ref = node.get("source_ref")
+        if isinstance(source_ref, dict):
+            refs.append(source_ref)
+        source_refs = node.get("source_refs")
+        if isinstance(source_refs, list):
+            refs.extend(source_refs)
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            quote = str(item.get("quote", "")).strip()
+            anchor_id = str(item.get("anchor_id", "")).strip()
+            page = ""
+            span = item.get("source_span")
+            if isinstance(span, dict) and span.get("page") is not None:
+                page = str(span.get("page"))
+            if quote or anchor_id or page:
+                return quote, page, anchor_id
+        return "", "", ""
 
     def _validate_structured_items(
         self,
         raw: Any,
         *,
         allowed_node_ids: set[str],
+        route_nodes: list[dict[str, object]],
         field_name: str,
     ) -> list[dict[str, object]]:
         from research_layer.services.llm_gateway import ResearchLLMError
@@ -397,7 +457,10 @@ class RouteSummarizer:
                     message=f"{field_name} items must be objects",
                     details={"field": field_name},
                 )
-            text = str(item.get("text", "")).strip()
+            text = self._replace_raw_node_ids(
+                str(item.get("text", "")).strip(),
+                route_nodes=route_nodes,
+            )
             if not text:
                 raise ResearchLLMError(
                     status_code=502,
@@ -419,10 +482,23 @@ class RouteSummarizer:
                     message=f"{field_name}.node_refs must be array",
                     details={"field": field_name},
                 )
-            node_refs = [
-                str(node_id)
-                for node_id in node_refs_values
-                if str(node_id) in allowed_node_ids
-            ]
+            node_refs: list[str] = []
+            invalid_node_refs: list[str] = []
+            for node_id in node_refs_values:
+                rendered_node_id = str(node_id)
+                if rendered_node_id in allowed_node_ids:
+                    node_refs.append(rendered_node_id)
+                else:
+                    invalid_node_refs.append(rendered_node_id)
+            if invalid_node_refs:
+                raise ResearchLLMError(
+                    status_code=502,
+                    error_code="research.llm_invalid_output",
+                    message=f"{field_name}.node_refs contains ids outside this route",
+                    details={
+                        "field": field_name,
+                        "invalid_node_refs": invalid_node_refs,
+                    },
+                )
             normalized.append({"text": text, "node_refs": node_refs})
         return normalized

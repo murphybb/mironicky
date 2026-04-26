@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import base64
+import asyncio
 import io
 import zipfile
 
@@ -11,6 +12,7 @@ from research_layer.extractors import EvidenceExtractor
 from research_layer.services.llm_gateway import ResearchLLMError
 from research_layer.services.llm_trace import LLMCallResult
 from research_layer.services.source_parser import SourceParser
+from research_layer.services.source_chunking_service import SourceChunk
 from research_layer.services.source_import_service import SourceImportService
 from research_layer.workers.extraction_worker import ExtractionWorker
 
@@ -81,91 +83,436 @@ def test_extraction_worker_resolves_pdf_whitespace_span(tmp_path) -> None:
     assert "品牌态度" in text
 
 
-def test_extraction_worker_adds_explicit_paper_hypotheses_and_conclusions(tmp_path) -> None:
+def test_extraction_worker_dedupes_llm_hypothesis_paraphrase_without_deterministic_claims(
+    tmp_path,
+) -> None:
     worker = ExtractionWorker(_build_store(tmp_path))
-    parsed = SourceParser().parse(
-        source_type="paper",
-        content=(
-            "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。"
-            "H2:社会主流向善一致性中介于文化认知与品牌态度之间,有积极的影响。"
-            "H3:当消费者与多种品牌都具有相同的文化认知时,消费者会根据品牌的社会主流向善对品牌进行差别排序。"
-            "结论及启示 本文以三个实验为基础,探讨了消费者认知对品牌态度的正向影响、"
-            "社会主流向善一致性的中介作用、差序格局的调节作用。最终得出以下结论:"
-            "第一,消费者决策与消费者认知有高度相关性。"
-            "第二,社会主流向善一致性对品牌态度呈显著的正向影响。"
-            "第三,消费者会根据品牌的社会主流向善性进行差别排序,但结果并不显著。"
-        ),
-        metadata={},
-    )
-
-    candidates = worker._build_explicit_paper_claim_candidates(
-        source={"source_type": "paper"},
-        parsed=parsed,
-        request_id="req_explicit_claims",
-    )
-
-    assumption_texts = [
-        str(candidate["text"])
-        for candidate in candidates
-        if candidate["candidate_type"] == "assumption"
-    ]
-    conclusion_texts = [
-        str(candidate["text"])
-        for candidate in candidates
-        if candidate["candidate_type"] == "conclusion"
-    ]
-
-    assert len(assumption_texts) == 3
-    assert any(text.startswith("H1:") for text in assumption_texts)
-    assert any(text.startswith("H2:") for text in assumption_texts)
-    assert any(text.startswith("H3:") for text in assumption_texts)
-    assert any("消费者决策与消费者认知" in text for text in conclusion_texts)
-    assert any("社会主流向善一致性" in text for text in conclusion_texts)
-    assert any("差别排序" in text for text in conclusion_texts)
-    assert {str(candidate["semantic_type"]) for candidate in candidates} == {
-        "hypothesis",
-        "conclusion",
+    llm_claim = {
+        "candidate_type": "assumption",
+        "semantic_type": "hypothesis",
+        "text": "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
+        "source_span": {"start": 0, "end": 31, "text": "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。"},
+        "quote": "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
+        "extractor_name": "argument_unit_extractor",
     }
-    units = worker._explicit_candidates_to_argument_units(candidates)
-    assert len(units) == len(candidates)
-    assert all(
-        candidate["trace_refs"]["argument_unit_id"] == unit["unit_id"]
-        for candidate, unit in zip(candidates, units, strict=True)
-    )
-    assert {str(unit["semantic_type"]) for unit in units} == {
-        "hypothesis",
-        "conclusion",
-    }
-    assert all(candidate["fallback_used"] is False for candidate in candidates)
-    assert all(candidate["degraded"] is False for candidate in candidates)
-
-
-def test_extraction_worker_dedupes_llm_hypothesis_paraphrase(tmp_path) -> None:
-    worker = ExtractionWorker(_build_store(tmp_path))
-    parsed = SourceParser().parse(
-        source_type="paper",
-        content="H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
-        metadata={},
-    )
-    explicit = worker._build_explicit_paper_claim_candidates(
-        source={"source_type": "paper"},
-        parsed=parsed,
-        request_id="req_explicit_claims",
-    )
     llm_paraphrase = {
         "candidate_type": "conclusion",
         "semantic_type": "claim",
         "text": "Hypothesis H1: Consumers choose brands similar to their cognition under certain conditions",
-        "source_span": explicit[0]["source_span"],
-        "quote": explicit[0]["quote"],
+        "source_span": llm_claim["source_span"],
+        "quote": llm_claim["quote"],
         "extractor_name": "argument_unit_extractor",
     }
 
-    deduped = worker._dedupe_candidates([llm_paraphrase, explicit[0]])
+    deduped = worker._dedupe_candidates([llm_paraphrase, llm_claim])
 
     assert len(deduped) == 1
-    assert deduped[0]["extractor_name"] == "deterministic_explicit_paper_claim_extractor"
+    assert deduped[0]["extractor_name"] == "argument_unit_extractor"
     assert str(deduped[0]["text"]).startswith("H1:")
+
+
+def test_extraction_worker_normalizes_paper_map_payload(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+
+    memo = worker._normalize_document_reading_memo(
+        {
+            "document_summary": "AIFS paper summary",
+            "document_type": "academic_paper",
+            "domain_profile": ["weather_forecasting"],
+            "research_questions": [
+                {
+                    "quote": "Can a data-driven forecasting system match IFS?",
+                    "reason": "central question",
+                    "section": "Introduction",
+                }
+            ],
+            "method_chain": [
+                {
+                    "quote": "AIFS uses an encoder, processor, and decoder.",
+                    "reason": "architecture",
+                }
+            ],
+            "results_or_findings": [
+                {"quote": "AIFS outperforms IFS for several variables.", "reason": "result"}
+            ],
+            "coverage_warnings": ["tables are not fully represented"],
+        }
+    )
+
+    required_keys = {
+        "document_summary",
+        "document_type",
+        "research_questions",
+        "main_contributions",
+        "hypotheses_or_claims",
+        "method_chain",
+        "data_or_corpus",
+        "experiments_or_validation",
+        "results_or_findings",
+        "limitations_or_open_questions",
+        "artifact_index",
+        "route_seed_candidates",
+        "coverage_warnings",
+    }
+
+    assert required_keys.issubset(memo.keys())
+    assert memo["document_type"] == "academic_paper"
+    assert memo["research_questions"][0]["section"] == "Introduction"
+    assert memo["method_chain"][0]["quote"].startswith("AIFS uses")
+    assert memo["coverage_warnings"] == ["tables are not fully represented"]
+
+
+def test_extraction_worker_persists_paper_map_as_source_artifact(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    worker = ExtractionWorker(store)
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content="AIFS uses a graph neural network architecture.",
+        metadata={},
+    )
+    store.replace_source_artifacts(
+        workspace_id="ws_paper_map_artifact",
+        source_id="src_paper_map",
+        artifacts=worker._build_source_artifacts(
+            workspace_id="ws_paper_map_artifact",
+            source_id="src_paper_map",
+            parsed=parsed,
+        ),
+    )
+
+    worker._persist_paper_map_artifact(
+        workspace_id="ws_paper_map_artifact",
+        source_id="src_paper_map",
+        document_reading_memo={
+            "document_summary": "AIFS paper",
+            "document_type": "technical_report",
+        },
+    )
+
+    artifacts = store.list_source_artifacts(
+        workspace_id="ws_paper_map_artifact", source_id="src_paper_map"
+    )
+    paper_map_artifacts = [
+        artifact for artifact in artifacts if artifact["artifact_type"] == "paper_map"
+    ]
+
+    assert len(paper_map_artifacts) == 1
+    assert paper_map_artifacts[0]["anchor_id"] == "paper_map"
+    assert paper_map_artifacts[0]["metadata"]["schema"] == "paper_map_v1"
+    assert paper_map_artifacts[0]["metadata"]["prompt_name"] == "extraction_document_reader"
+    assert "AIFS paper" in paper_map_artifacts[0]["content"]
+
+
+def test_extraction_worker_builds_source_grounded_paper_map_focus_chunk(tmp_path) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content=(
+            "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。\n"
+            "H2:社会主流向善一致性中介于文化认知与品牌态度之间。\n"
+            "实验二为问卷调查法，通过对中介作用的考察来进一步揭示机制。"
+        ),
+        metadata={},
+    )
+
+    focus_chunk = worker._build_paper_map_focus_chunk(
+        source_id="src_focus",
+        parsed=parsed,
+        document_reading_memo={
+            "hypotheses_or_claims": [
+                {
+                    "quote": "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
+                    "reason": "central hypothesis",
+                },
+                {
+                    "quote": "H4:这句话不在原文里。",
+                    "reason": "hallucinated hypothesis",
+                },
+            ],
+            "experiments_or_validation": [
+                {
+                    "quote": "实验二为问卷调查法，通过对中介作用的考察来进一步揭示机制。",
+                    "reason": "validation design",
+                }
+            ],
+        },
+        chunk_index=7,
+    )
+
+    assert focus_chunk is not None
+    assert focus_chunk.chunk_id == "src_focus:paper_map_focus"
+    assert focus_chunk.chunk_index == 7
+    assert focus_chunk.section_hint == "paper_map_focus"
+    assert "H1:当相对条件一定时" in focus_chunk.text
+    assert "实验二为问卷调查法" in focus_chunk.text
+    assert "H4:这句话不在原文里" not in focus_chunk.text
+
+
+@pytest.mark.asyncio
+async def test_extraction_worker_appends_paper_map_focus_chunk_to_extraction_plan(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    import_service = SourceImportService(store)
+    source = import_service.import_source(
+        workspace_id="ws_focus_plan",
+        source_type="paper",
+        title="focus paper",
+        content=(
+            "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。\n"
+            "普通段落提供背景材料。"
+        ),
+        metadata={},
+        request_id="req_focus_plan",
+    )
+    job = store.create_job(
+        job_type="source_extract",
+        workspace_id="ws_focus_plan",
+        request_id="req_focus_plan",
+    )
+    worker = ExtractionWorker(store)
+
+    async def fake_document_reader(**kwargs):
+        return {
+            "hypotheses_or_claims": [
+                {
+                    "quote": "H1:当相对条件一定时,消费者会选择购买与其认知趋近相同的品牌。",
+                    "reason": "central hypothesis",
+                }
+            ]
+        }
+
+    captured_chunks: list[SourceChunk] = []
+
+    async def fake_extract_chunks_for_plan(**kwargs):
+        captured_chunks.extend(kwargs["chunks"])
+        return []
+
+    monkeypatch.setattr(worker, "_build_document_reading_memo", fake_document_reader)
+    monkeypatch.setattr(worker, "_extract_chunks_for_plan", fake_extract_chunks_for_plan)
+
+    result = await worker.run(
+        request_id="req_focus_plan",
+        job_id=str(job["job_id"]),
+        workspace_id="ws_focus_plan",
+        source_id=str(source["source_id"]),
+    )
+
+    assert result["status"] == "succeeded"
+    assert captured_chunks
+    assert captured_chunks[-1].chunk_id.endswith(":paper_map_focus")
+    assert captured_chunks[-1].section_hint == "paper_map_focus"
+
+
+def test_extraction_worker_document_reader_chunk_samples_whole_document(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_MAX_INPUT_CHARS", "320")
+    monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_MAX_INPUT_SEGMENTS", "6")
+    worker = ExtractionWorker(_build_store(tmp_path))
+    content = " ".join(
+        [
+            "Opening sentence describes the paper goal.",
+            "Opening context explains the study background.",
+            *[f"Filler sentence {index} repeats background." for index in range(20)],
+            "H1: The tested hypothesis links cognition to brand attitude.",
+            *[f"More filler sentence {index}." for index in range(20)],
+            "Conclusion: The final finding reports the mediation chain.",
+        ]
+    )
+    parsed = SourceParser().parse(source_type="paper", content=content, metadata={})
+
+    prompt_chunk = worker._build_document_reader_prompt_chunk(parsed)
+
+    assert "Opening sentence describes the paper goal" in prompt_chunk
+    assert "H1: The tested hypothesis" in prompt_chunk
+    assert "Conclusion: The final finding" in prompt_chunk
+
+
+def test_extraction_worker_default_chunking_does_not_collapse_long_paper(
+    tmp_path,
+) -> None:
+    worker = ExtractionWorker(_build_store(tmp_path))
+    content_blocks = [
+        {
+            "text": f"Section {index}. " + ("This paragraph describes one paper section. " * 140),
+            "start": index * 5000,
+            "page": index + 1,
+            "anchor_id": f"p{index + 1}-b0",
+        }
+        for index in range(6)
+    ]
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content=" ".join(str(block["text"]) for block in content_blocks),
+        metadata={"parser_metadata": {"blocks": content_blocks}},
+    )
+
+    chunk_plan = worker._chunking.plan(source_id="src_long_paper", parsed=parsed)
+
+    assert len(chunk_plan.chunks) > 1
+    assert max(len(chunk.text) for chunk in chunk_plan.chunks) <= 10000
+
+
+@pytest.mark.asyncio
+async def test_extraction_worker_processes_chunks_concurrently(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RESEARCH_SOURCE_EXTRACT_CHUNK_CONCURRENCY", "3")
+    worker = ExtractionWorker(_build_store(tmp_path))
+    active = 0
+    max_active = 0
+
+    async def fake_extract_argument_units_for_chunk(**kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        chunk = kwargs["chunk"]
+        return (
+            [],
+            [
+                {
+                    "candidate_type": "evidence",
+                    "text": f"candidate {chunk.chunk_index}",
+                    "source_span": {"start": 0, "end": 1, "text": "x"},
+                }
+            ],
+            None,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "_extract_argument_units_for_chunk",
+        fake_extract_argument_units_for_chunk,
+    )
+    chunks = [
+        SourceChunk(
+            chunk_id=f"src:chunk:{index}",
+            chunk_index=index,
+            section_hint="full",
+            start=index,
+            end=index + 1,
+            text=f"chunk {index}",
+            chunk_hash=f"hash{index}",
+        )
+        for index in range(5)
+    ]
+
+    results = await worker._extract_chunks_for_plan(
+        request_id="req_concurrent_chunks",
+        job_id="job_concurrent_chunks",
+        workspace_id="ws_concurrent_chunks",
+        source={"source_id": "src_concurrent_chunks"},
+        parsed=SourceParser().parse(source_type="paper", content="x. y.", metadata={}),
+        batch_id="batch_concurrent_chunks",
+        chunks=chunks,
+        chunk_count=len(chunks),
+        document_reading_memo={},
+        failure_mode=None,
+        backend=None,
+        model=None,
+    )
+
+    assert max_active > 1
+    assert len(results) == 5
+    assert [result["chunk_index"] for result in results] == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_extraction_worker_chunk_cache_is_scoped_by_paper_map(tmp_path) -> None:
+    store = _build_store(tmp_path)
+    worker = ExtractionWorker(store)
+    old_paper_map = {"document_summary": "old PaperMap"}
+    new_paper_map = {"document_summary": "new PaperMap"}
+    parsed = SourceParser().parse(
+        source_type="paper",
+        content="fresh claim. cached claim.",
+        metadata={},
+    )
+    chunk = SourceChunk(
+        chunk_id="src_cache:chunk:0",
+        chunk_index=0,
+        section_hint="abstract",
+        start=0,
+        end=len(parsed.normalized_content),
+        text=parsed.normalized_content,
+        chunk_hash="same_chunk_hash",
+    )
+    store.upsert_source_chunk_cache(
+        workspace_id="ws_cache_scope",
+        source_id="src_cache",
+        chunk_hash=chunk.chunk_hash,
+        cache_key=(
+            "candidate:argument_unit_extractor:v10_paper_map_units:"
+            f"{worker._paper_map_cache_hash(old_paper_map)}"
+        ),
+        payload={
+            "paper_map_hash": worker._paper_map_cache_hash(old_paper_map),
+            "units": [{"text": "cached claim"}],
+            "candidates": [
+                {
+                    "candidate_type": "evidence",
+                    "text": "cached claim",
+                    "source_span": {"start": 13, "end": 25, "text": "cached claim"},
+                }
+            ],
+        },
+    )
+
+    class _FreshGateway:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def invoke_text(self, **kwargs: object) -> LLMCallResult:
+            self.calls += 1
+            return LLMCallResult(
+                provider_backend="unit_test_backend",
+                provider_model="unit_test_model",
+                request_id=str(kwargs["request_id"]),
+                llm_response_id="resp_cache_scope",
+                usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                raw_text=(
+                    '{"units":[{"unit_id":"unit_fresh","candidate_type":"evidence",'
+                    '"semantic_type":"result","text":"fresh claim",'
+                    '"quote":"fresh claim","confidence_score":0.9}]}'
+                ),
+                parsed_json={
+                    "units": [
+                        {
+                            "unit_id": "unit_fresh",
+                            "candidate_type": "evidence",
+                            "semantic_type": "result",
+                            "text": "fresh claim",
+                            "quote": "fresh claim",
+                            "confidence_score": 0.9,
+                        }
+                    ]
+                },
+                fallback_used=False,
+                degraded=False,
+                degraded_reason=None,
+            )
+
+    gateway = _FreshGateway()
+    worker._gateway = gateway
+
+    _, candidates, trace = await worker._extract_argument_units_for_chunk(
+        request_id="req_cache_scope",
+        workspace_id="ws_cache_scope",
+        source={"source_id": "src_cache", "title": "paper", "source_type": "paper"},
+        parsed=parsed,
+        chunk=chunk,
+        document_reading_memo=new_paper_map,
+        failure_mode=None,
+        backend=None,
+        model=None,
+    )
+
+    assert gateway.calls == 1
+    assert trace is not None
+    assert [candidate["text"] for candidate in candidates] == ["fresh claim"]
 
 
 def test_extraction_worker_builds_traceable_source_artifacts(tmp_path) -> None:
