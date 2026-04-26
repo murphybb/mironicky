@@ -1444,6 +1444,14 @@ export async function listHypothesisPoolRounds(poolId: string) {
   return request<ListResponse<any>>(`/api/v1/research/hypotheses/pools/${encodeURIComponent(poolId)}/rounds`);
 }
 
+export async function listHypothesisPoolTranscripts(poolId: string) {
+  return request<ListResponse<any>>(`/api/v1/research/hypotheses/pools/${encodeURIComponent(poolId)}/transcripts`);
+}
+
+export async function getHypothesisPoolTrajectory(poolId: string) {
+  return request<any>(`/api/v1/research/hypotheses/pools/${encodeURIComponent(poolId)}/trajectory`);
+}
+
 export async function runHypothesisPoolRound(
   poolId: string,
   workspaceOrPayload: string | { workspace_id: string; async_mode?: boolean; max_matches?: number },
@@ -1487,8 +1495,43 @@ export async function controlHypothesisPool(
   poolId: string,
   payload: {
     workspace_id: string;
-    action: 'pause' | 'resume' | 'stop' | 'force_finalize' | 'disable_retrieval' | 'add_sources';
+    action:
+      | 'pause'
+      | 'resume'
+      | 'stop'
+      | 'force_finalize'
+      | 'disable_retrieval'
+      | 'add_sources'
+      | 'edit_reasoning_node'
+      | 'delete_reasoning_node'
+      | 'add_reasoning_node'
+      | 'edit_candidate'
+      | 'add_user_hypothesis';
     source_ids?: string[];
+    candidate_id?: string;
+    node?: {
+      node_id?: string;
+      node_type:
+        | 'evidence'
+        | 'assumption'
+        | 'intermediate_reasoning'
+        | 'conclusion'
+        | 'validation_need';
+      content?: string;
+      source_refs?: unknown[];
+    };
+    candidate_patch?: {
+      title?: string;
+      statement?: string;
+      hypothesis_level_conclusion?: string;
+    };
+    user_hypothesis?: {
+      title?: string;
+      statement: string;
+      hypothesis_level_conclusion?: string;
+      reasoning_chain?: Record<string, unknown>;
+    };
+    control_reason?: string;
   }
 ) {
   return request<any>(`/api/v1/research/hypotheses/pools/${encodeURIComponent(poolId)}/control`, {
@@ -1497,6 +1540,11 @@ export async function controlHypothesisPool(
       workspace_id: payload.workspace_id,
       action: payload.action,
       ...(payload.source_ids === undefined ? {} : { source_ids: payload.source_ids }),
+      ...(payload.candidate_id === undefined ? {} : { candidate_id: payload.candidate_id }),
+      ...(payload.node === undefined ? {} : { node: payload.node }),
+      ...(payload.candidate_patch === undefined ? {} : { candidate_patch: payload.candidate_patch }),
+      ...(payload.user_hypothesis === undefined ? {} : { user_hypothesis: payload.user_hypothesis }),
+      ...(payload.control_reason === undefined ? {} : { control_reason: payload.control_reason }),
     },
   });
 }

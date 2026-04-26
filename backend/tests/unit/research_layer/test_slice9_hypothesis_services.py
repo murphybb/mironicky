@@ -217,7 +217,7 @@ async def test_slice9_generate_outputs_structured_candidate_with_validation_and_
 
 
 @pytest.mark.asyncio
-async def test_slice9_generate_invalid_json_uses_deterministic_fallback_when_allowed(
+async def test_slice9_generate_invalid_json_fails_even_when_fallback_header_allowed(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _build_store(tmp_path)
@@ -243,36 +243,27 @@ async def test_slice9_generate_invalid_json_uses_deterministic_fallback_when_all
         lambda: ("openai", "gpt-4.1-mini"),
     )
 
-    generated = await service.generate_candidate(
-        workspace_id=workspace_id,
-        trigger_ids=trigger_ids,
-        request_id="req_slice9_generate_fallback",
-        generation_job_id="job_slice9_generate_fallback",
-        failure_mode="invalid_json",
-        allow_fallback=True,
-    )
+    with pytest.raises(HypothesisServiceError) as exc_info:
+        await service.generate_candidate(
+            workspace_id=workspace_id,
+            trigger_ids=trigger_ids,
+            request_id="req_slice9_generate_fallback",
+            generation_job_id="job_slice9_generate_fallback",
+            failure_mode="invalid_json",
+            allow_fallback=True,
+        )
 
-    assert generated["status"] == "candidate"
-    assert generated["title"]
-    assert generated["statement"]
-    assert generated["rationale"]
-    assert generated["testability_hint"]
-    assert generated["trigger_refs"][0]["trigger_id"] == trigger_ids[0]
-    assert generated["provider_backend"] == "openai"
-    assert generated["provider_model"] == "gpt-4.1-mini"
-    assert generated["request_id"] == "req_slice9_generate_fallback"
-    assert generated["llm_response_id"] in {"", None}
-    assert generated.get("fallback_used") is True
-    assert generated.get("degraded") is True
-    assert generated.get("degraded_reason") == "research.llm_invalid_output"
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.error_code == "research.llm_invalid_output"
+    assert store.list_hypotheses(workspace_id=workspace_id) == []
 
     with sqlite3.connect(store.db_path) as conn:
         row = conn.execute(
             """
-            SELECT metrics_json
+            SELECT error_json
             FROM research_events
             WHERE event_name = 'hypothesis_generation_completed'
-              AND status = 'completed'
+              AND status = 'failed'
               AND request_id = ?
             ORDER BY timestamp DESC, event_id DESC
             LIMIT 1
@@ -280,8 +271,6 @@ async def test_slice9_generate_invalid_json_uses_deterministic_fallback_when_all
             ("req_slice9_generate_fallback",),
         ).fetchone()
     assert row is not None
-    assert '"fallback_used": true' in row[0]
-    assert '"degraded": true' in row[0]
     assert "research.llm_invalid_output" in row[0]
 
 
@@ -405,7 +394,11 @@ async def test_slice9_generate_with_llm_injects_ontology_and_tool_capability_con
                 provider_model="gpt-4.1-mini",
                 request_id="req_slice9_llm_context_enriched",
                 llm_response_id="resp_slice9_llm_context_enriched",
-                usage={"prompt_tokens": 66, "completion_tokens": 21, "total_tokens": 87},
+                usage={
+                    "prompt_tokens": 66,
+                    "completion_tokens": 21,
+                    "total_tokens": 87,
+                },
                 raw_text="{}",
                 parsed_json=parsed,
                 fallback_used=False,
@@ -427,7 +420,9 @@ async def test_slice9_generate_with_llm_injects_ontology_and_tool_capability_con
 
     messages = captured.get("messages", [])
     rendered = "\n".join(
-        str(getattr(item, "content", "")) for item in messages if hasattr(item, "content")
+        str(getattr(item, "content", ""))
+        for item in messages
+        if hasattr(item, "content")
     )
     assert "ontology_path_context_json" in rendered
     assert "tool_capability_context" in rendered

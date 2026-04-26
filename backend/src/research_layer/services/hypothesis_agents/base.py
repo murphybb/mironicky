@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 
-from research_layer.services.prompt_renderer import load_prompt_template, render_prompt_template
+from research_layer.services.prompt_renderer import (
+    load_prompt_template,
+    render_prompt_template,
+)
 
 
 PROMPT_SOURCE_VALUES = {
@@ -39,6 +42,12 @@ class HypothesisAgentBase:
             "prompt_template": self.prompt_file,
             "prompt_chars": len(rendered_prompt),
         }
+
+    def _raise_llm_gateway_only(self) -> None:
+        raise RuntimeError(
+            f"{self.__class__.__name__} cannot produce production output locally; "
+            "invoke it through HypothesisMultiAgentOrchestrator and LLMGateway."
+        )
 
     def _tokenize(self, text: str) -> set[str]:
         return {item for item in re.findall(r"[a-z0-9]+", text.lower()) if item}

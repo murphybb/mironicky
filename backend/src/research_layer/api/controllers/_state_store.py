@@ -115,7 +115,11 @@ class ResearchApiStateStore:
         self, *, support_score: float, risk_score: float, progressability_score: float
     ) -> tuple[float, str]:
         confidence_score = round(
-            (float(support_score) + (100.0 - float(risk_score)) + float(progressability_score))
+            (
+                float(support_score)
+                + (100.0 - float(risk_score))
+                + float(progressability_score)
+            )
             / 3.0,
             1,
         )
@@ -776,6 +780,7 @@ class ResearchApiStateStore:
                 change_summary TEXT NOT NULL,
                 preserved_claims_json TEXT NOT NULL,
                 modified_claims_json TEXT NOT NULL,
+                trace_refs_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             )
             """,
@@ -790,6 +795,29 @@ class ResearchApiStateStore:
                 continue_recommendation TEXT NOT NULL,
                 stop_recommendation TEXT NOT NULL,
                 diversity_assessment TEXT NOT NULL,
+                trace_refs_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS hypothesis_agent_transcripts (
+                transcript_id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL,
+                round_id TEXT,
+                candidate_id TEXT,
+                match_id TEXT,
+                agent_name TEXT NOT NULL,
+                agent_role TEXT NOT NULL,
+                prompt_template TEXT NOT NULL,
+                input_payload_json TEXT NOT NULL,
+                output_payload_json TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                token_usage_json TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_code TEXT,
+                error_message TEXT,
                 created_at TEXT NOT NULL
             )
             """,
@@ -803,6 +831,7 @@ class ResearchApiStateStore:
                 shared_trigger_ratio REAL NOT NULL,
                 shared_object_ratio REAL NOT NULL,
                 shared_chain_overlap REAL NOT NULL,
+                trace_refs_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             )
             """,
@@ -966,9 +995,7 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "candidates", "semantic_type", "TEXT")
                 self._ensure_column(conn, "candidates", "quote", "TEXT")
                 self._ensure_column(conn, "candidates", "trace_refs_json", "TEXT")
-                self._ensure_column(
-                    conn, "candidates", "provider_backend", "TEXT"
-                )
+                self._ensure_column(conn, "candidates", "provider_backend", "TEXT")
                 self._ensure_column(conn, "candidates", "provider_model", "TEXT")
                 self._ensure_column(conn, "candidates", "llm_request_id", "TEXT")
                 self._ensure_column(conn, "candidates", "llm_response_id", "TEXT")
@@ -980,7 +1007,9 @@ class ResearchApiStateStore:
                 self._ensure_column(
                     conn, "extraction_results", "provider_backend", "TEXT"
                 )
-                self._ensure_column(conn, "extraction_results", "provider_model", "TEXT")
+                self._ensure_column(
+                    conn, "extraction_results", "provider_model", "TEXT"
+                )
                 self._ensure_column(
                     conn, "extraction_results", "llm_request_id", "TEXT"
                 )
@@ -1025,9 +1054,7 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "routes", "fallback_used", "INTEGER")
                 self._ensure_column(conn, "routes", "degraded", "INTEGER")
                 self._ensure_column(conn, "routes", "degraded_reason", "TEXT")
-                self._ensure_column(
-                    conn, "routes", "summary_generation_mode", "TEXT"
-                )
+                self._ensure_column(conn, "routes", "summary_generation_mode", "TEXT")
                 self._ensure_column(conn, "routes", "route_edge_ids_json", "TEXT")
                 self._ensure_column(conn, "routes", "key_strengths_json", "TEXT")
                 self._ensure_column(conn, "routes", "key_risks_json", "TEXT")
@@ -1035,10 +1062,7 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "graph_nodes", "object_ref_type", "TEXT")
                 self._ensure_column(conn, "graph_nodes", "object_ref_id", "TEXT")
                 self._ensure_column(
-                    conn,
-                    "graph_nodes",
-                    "short_tags_json",
-                    "TEXT NOT NULL DEFAULT '[]'",
+                    conn, "graph_nodes", "short_tags_json", "TEXT NOT NULL DEFAULT '[]'"
                 )
                 self._ensure_column(
                     conn,
@@ -1056,10 +1080,7 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "graph_nodes", "updated_at", "TEXT")
                 self._ensure_column(conn, "graph_nodes", "claim_id", "TEXT")
                 self._ensure_column(
-                    conn,
-                    "graph_nodes",
-                    "source_ref_json",
-                    "TEXT NOT NULL DEFAULT '{}'",
+                    conn, "graph_nodes", "source_ref_json", "TEXT NOT NULL DEFAULT '{}'"
                 )
                 self._ensure_column(conn, "graph_edges", "object_ref_type", "TEXT")
                 self._ensure_column(conn, "graph_edges", "object_ref_id", "TEXT")
@@ -1067,10 +1088,7 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "graph_edges", "updated_at", "TEXT")
                 self._ensure_column(conn, "graph_edges", "claim_id", "TEXT")
                 self._ensure_column(
-                    conn,
-                    "graph_edges",
-                    "source_ref_json",
-                    "TEXT NOT NULL DEFAULT '{}'",
+                    conn, "graph_edges", "source_ref_json", "TEXT NOT NULL DEFAULT '{}'"
                 )
                 for table_name in (
                     "research_evidences",
@@ -1128,6 +1146,24 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "hypotheses", "search_tree_node_id", "TEXT")
                 self._ensure_column(conn, "hypotheses", "reasoning_chain_id", "TEXT")
                 self._ensure_column(conn, "hypotheses", "weakest_step_ref_json", "TEXT")
+                self._ensure_column(
+                    conn,
+                    "hypothesis_evolutions",
+                    "trace_refs_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
+                self._ensure_column(
+                    conn,
+                    "hypothesis_meta_reviews",
+                    "trace_refs_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
+                self._ensure_column(
+                    conn,
+                    "hypothesis_proximity_edges",
+                    "trace_refs_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
                 self._ensure_column(conn, "memory_actions", "request_id", "TEXT")
                 self._ensure_column(conn, "memory_actions", "note", "TEXT")
                 self._ensure_column(conn, "memory_actions", "memory_ref_json", "TEXT")
@@ -1138,10 +1174,7 @@ class ResearchApiStateStore:
                     conn, "failures", "derived_from_validation_id", "TEXT"
                 )
                 self._ensure_column(
-                    conn,
-                    "failures",
-                    "derived_from_validation_result_id",
-                    "TEXT",
+                    conn, "failures", "derived_from_validation_result_id", "TEXT"
                 )
                 self._ensure_column(conn, "validations", "status", "TEXT")
                 self._ensure_column(conn, "validations", "latest_outcome", "TEXT")
@@ -1167,10 +1200,18 @@ class ResearchApiStateStore:
                 self._ensure_column(conn, "evidence_refs", "doi", "TEXT")
                 self._ensure_column(conn, "evidence_refs", "url", "TEXT")
                 self._ensure_column(conn, "evidence_refs", "venue", "TEXT")
-                self._ensure_column(conn, "evidence_refs", "publication_year", "INTEGER")
-                self._ensure_column(conn, "evidence_refs", "authors_json", "TEXT NOT NULL DEFAULT '[]'")
-                self._ensure_column(conn, "evidence_refs", "locator_json", "TEXT NOT NULL DEFAULT '{}'")
-                self._ensure_column(conn, "evidence_refs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+                self._ensure_column(
+                    conn, "evidence_refs", "publication_year", "INTEGER"
+                )
+                self._ensure_column(
+                    conn, "evidence_refs", "authors_json", "TEXT NOT NULL DEFAULT '[]'"
+                )
+                self._ensure_column(
+                    conn, "evidence_refs", "locator_json", "TEXT NOT NULL DEFAULT '{}'"
+                )
+                self._ensure_column(
+                    conn, "evidence_refs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'"
+                )
                 self._ensure_column(conn, "evidence_refs", "confirmed_at", "TEXT")
                 self._ensure_column(conn, "scholarly_source_cache", "doi", "TEXT")
                 self._ensure_column(conn, "scholarly_source_cache", "url", "TEXT")
@@ -1238,6 +1279,7 @@ class ResearchApiStateStore:
             "hypothesis_matches",
             "hypothesis_evolutions",
             "hypothesis_meta_reviews",
+            "hypothesis_agent_transcripts",
             "hypothesis_proximity_edges",
             "hypothesis_search_tree_nodes",
             "hypothesis_search_tree_edges",
@@ -1300,9 +1342,7 @@ class ResearchApiStateStore:
         self, source_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM sources WHERE source_id = ?",
-            (source_id,),
-            conn=conn,
+            "SELECT * FROM sources WHERE source_id = ?", (source_id,), conn=conn
         )
         if row is None:
             return None
@@ -1332,12 +1372,14 @@ class ResearchApiStateStore:
                 (source_id,),
                 conn=conn,
             )
-        latest_error = self._loads(latest_result["error_json"]) if latest_result is not None else None
+        latest_error = (
+            self._loads(latest_result["error_json"])
+            if latest_result is not None
+            else None
+        )
         source_hash = self.get_source_hash_for_source(source_id, conn=conn)
         memory_recall = self.get_latest_source_memory_recall_result(
-            workspace_id=str(row["workspace_id"]),
-            source_id=source_id,
-            conn=conn,
+            workspace_id=str(row["workspace_id"]), source_id=source_id, conn=conn
         )
         return {
             "source_id": row["source_id"],
@@ -1350,9 +1392,17 @@ class ResearchApiStateStore:
             "metadata": self._loads(row["metadata_json"]),
             "import_request_id": row["import_request_id"],
             "last_extract_job_id": last_extract_job_id,
-            "last_candidate_batch_id": latest_result["candidate_batch_id"] if latest_result is not None else None,
-            "last_extract_status": latest_result["status"] if latest_result is not None else None,
-            "last_extract_error": latest_error if isinstance(latest_error, dict) else None,
+            "last_candidate_batch_id": (
+                latest_result["candidate_batch_id"]
+                if latest_result is not None
+                else None
+            ),
+            "last_extract_status": (
+                latest_result["status"] if latest_result is not None else None
+            ),
+            "last_extract_error": (
+                latest_error if isinstance(latest_error, dict) else None
+            ),
             "source_hash": source_hash,
             "memory_recall": memory_recall,
             "created_at": self._from_iso(row["created_at"]),
@@ -1480,18 +1530,12 @@ class ResearchApiStateStore:
             ),
             conn=conn,
         )
-        record = self.get_source_memory_recall_result(
-            resolved_recall_id,
-            conn=conn,
-        )
+        record = self.get_source_memory_recall_result(resolved_recall_id, conn=conn)
         assert record is not None
         return record
 
     def get_source_memory_recall_result(
-        self,
-        recall_id: str,
-        *,
-        conn: sqlite3.Connection | None = None,
+        self, recall_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
             "SELECT * FROM source_memory_recall_results WHERE recall_id = ?",
@@ -1748,7 +1792,9 @@ class ResearchApiStateStore:
             for row in rows
         ]
 
-    def list_source_topic_clusters(self, *, workspace_id: str) -> list[dict[str, object]]:
+    def list_source_topic_clusters(
+        self, *, workspace_id: str
+    ) -> list[dict[str, object]]:
         rows = self._fetchall(
             """
             SELECT source_id, metadata_json
@@ -1852,7 +1898,9 @@ class ResearchApiStateStore:
         degraded_reason_raw = row["degraded_reason"]
         degraded = bool(row["degraded"] or degraded_reason_raw)
         degraded_reason = (
-            str(degraded_reason_raw).strip() if degraded and degraded_reason_raw else None
+            str(degraded_reason_raw).strip()
+            if degraded and degraded_reason_raw
+            else None
         )
         return {
             "candidate_id": row["candidate_id"],
@@ -1952,14 +2000,11 @@ class ResearchApiStateStore:
                         candidate.get("provider_model")
                         or (llm_trace or {}).get("provider_model")
                     ),
-                    candidate.get("request_id")
-                    or (llm_trace or {}).get("request_id"),
+                    candidate.get("request_id") or (llm_trace or {}).get("request_id"),
                     candidate.get("llm_response_id")
                     or (llm_trace or {}).get("llm_response_id"),
                     self._dumps(
-                        candidate.get("usage")
-                        or (llm_trace or {}).get("usage")
-                        or {}
+                        candidate.get("usage") or (llm_trace or {}).get("usage") or {}
                     ),
                     int(
                         bool(
@@ -2045,10 +2090,7 @@ class ResearchApiStateStore:
         return created
 
     def get_relation_candidate(
-        self,
-        relation_candidate_id: str,
-        *,
-        conn: sqlite3.Connection | None = None,
+        self, relation_candidate_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
             "SELECT * FROM relation_candidates WHERE relation_candidate_id = ?",
@@ -2098,20 +2140,14 @@ class ResearchApiStateStore:
         results: list[dict[str, object]] = []
         for row in rows:
             relation = self.get_relation_candidate(
-                str(row["relation_candidate_id"]),
-                conn=conn,
+                str(row["relation_candidate_id"]), conn=conn
             )
             if relation is not None:
                 results.append(relation)
         return results
 
     def get_source_chunk_cache(
-        self,
-        *,
-        workspace_id: str,
-        source_id: str,
-        chunk_hash: str,
-        cache_key: str,
+        self, *, workspace_id: str, source_id: str, chunk_hash: str, cache_key: str
     ) -> dict[str, object] | None:
         row = self._fetchone(
             """
@@ -2224,7 +2260,9 @@ class ResearchApiStateStore:
     ) -> None:
         normalized_degraded = bool(degraded or degraded_reason)
         normalized_degraded_reason = (
-            str(degraded_reason).strip() if degraded_reason and normalized_degraded else None
+            str(degraded_reason).strip()
+            if degraded_reason and normalized_degraded
+            else None
         )
         self._execute(
             """
@@ -2264,7 +2302,9 @@ class ResearchApiStateStore:
         degraded_reason_raw = row["degraded_reason"]
         degraded = bool(row["degraded"] or degraded_reason_raw)
         degraded_reason = (
-            str(degraded_reason_raw).strip() if degraded and degraded_reason_raw else None
+            str(degraded_reason_raw).strip()
+            if degraded and degraded_reason_raw
+            else None
         )
         return {
             "candidate_batch_id": row["candidate_batch_id"],
@@ -2329,34 +2369,36 @@ class ResearchApiStateStore:
             degraded_reason_raw = row["degraded_reason"]
             degraded = bool(row["degraded"] or degraded_reason_raw)
             degraded_reason = (
-                str(degraded_reason_raw).strip() if degraded and degraded_reason_raw else None
+                str(degraded_reason_raw).strip()
+                if degraded and degraded_reason_raw
+                else None
             )
             results.append(
                 {
-                "candidate_id": row["candidate_id"],
-                "workspace_id": row["workspace_id"],
-                "source_id": row["source_id"],
-                "candidate_type": row["candidate_type"],
-                "semantic_type": row["semantic_type"],
-                "text": row["text"],
-                "status": row["status"],
-                "source_span": self._loads(row["source_span_json"]),
-                "quote": row["quote"],
-                "trace_refs": self._loads_dict(row["trace_refs_json"]),
-                "candidate_batch_id": row["candidate_batch_id"],
-                "extraction_job_id": row["extraction_job_id"],
-                "extractor_name": row["extractor_name"],
-                "provider_backend": row["provider_backend"],
-                "provider_model": row["provider_model"],
-                "request_id": row["llm_request_id"],
-                "llm_response_id": row["llm_response_id"],
-                "usage": self._normalize_usage(
-                    self._loads(row["usage_json"]) if row["usage_json"] else None
-                ),
-                "fallback_used": bool(row["fallback_used"] or 0),
-                "degraded": degraded,
-                "degraded_reason": degraded_reason,
-            }
+                    "candidate_id": row["candidate_id"],
+                    "workspace_id": row["workspace_id"],
+                    "source_id": row["source_id"],
+                    "candidate_type": row["candidate_type"],
+                    "semantic_type": row["semantic_type"],
+                    "text": row["text"],
+                    "status": row["status"],
+                    "source_span": self._loads(row["source_span_json"]),
+                    "quote": row["quote"],
+                    "trace_refs": self._loads_dict(row["trace_refs_json"]),
+                    "candidate_batch_id": row["candidate_batch_id"],
+                    "extraction_job_id": row["extraction_job_id"],
+                    "extractor_name": row["extractor_name"],
+                    "provider_backend": row["provider_backend"],
+                    "provider_model": row["provider_model"],
+                    "request_id": row["llm_request_id"],
+                    "llm_response_id": row["llm_response_id"],
+                    "usage": self._normalize_usage(
+                        self._loads(row["usage_json"]) if row["usage_json"] else None
+                    ),
+                    "fallback_used": bool(row["fallback_used"] or 0),
+                    "degraded": degraded,
+                    "degraded_reason": degraded_reason,
+                }
             )
         return results
 
@@ -2443,9 +2485,7 @@ class ResearchApiStateStore:
             text=str(candidate["text"]),
             normalized_text=normalized_text,
             quote=(
-                str(candidate["quote"])
-                if candidate.get("quote") is not None
-                else None
+                str(candidate["quote"]) if candidate.get("quote") is not None else None
             ),
             source_span=(
                 dict(candidate["source_span"])
@@ -2465,9 +2505,7 @@ class ResearchApiStateStore:
         self, claim_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM claims WHERE claim_id = ?",
-            (claim_id,),
-            conn=conn,
+            "SELECT * FROM claims WHERE claim_id = ?", (claim_id,), conn=conn
         )
         if row is None:
             return None
@@ -2721,10 +2759,7 @@ class ResearchApiStateStore:
         return record
 
     def get_claim_memory_link(
-        self,
-        *,
-        claim_id: str,
-        conn: sqlite3.Connection | None = None,
+        self, *, claim_id: str, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
             "SELECT * FROM claim_memory_links WHERE claim_id = ? LIMIT 1",
@@ -2843,7 +2878,7 @@ class ResearchApiStateStore:
                 request_id,
             ),
             conn=conn,
-            )
+        )
         return {"object_type": candidate_type, "object_id": object_id}
 
     def create_reasoning_chain(
@@ -3069,10 +3104,12 @@ class ResearchApiStateStore:
         support_score = float(row["support_score"])
         risk_score = float(row["risk_score"])
         progressability_score = float(row["progressability_score"])
-        fallback_confidence_score, fallback_confidence_grade = self._compute_route_confidence(
-            support_score=support_score,
-            risk_score=risk_score,
-            progressability_score=progressability_score,
+        fallback_confidence_score, fallback_confidence_grade = (
+            self._compute_route_confidence(
+                support_score=support_score,
+                risk_score=risk_score,
+                progressability_score=progressability_score,
+            )
         )
         return {
             "route_id": row["route_id"],
@@ -3147,73 +3184,81 @@ class ResearchApiStateStore:
             support_score = float(row["support_score"])
             risk_score = float(row["risk_score"])
             progressability_score = float(row["progressability_score"])
-            fallback_confidence_score, fallback_confidence_grade = self._compute_route_confidence(
-                support_score=support_score,
-                risk_score=risk_score,
-                progressability_score=progressability_score,
+            fallback_confidence_score, fallback_confidence_grade = (
+                self._compute_route_confidence(
+                    support_score=support_score,
+                    risk_score=risk_score,
+                    progressability_score=progressability_score,
+                )
             )
             results.append(
                 {
-                "route_id": row["route_id"],
-                "workspace_id": row["workspace_id"],
-                "title": row["title"],
-                "summary": row["summary"],
-                "status": row["status"],
-                "support_score": support_score,
-                "risk_score": risk_score,
-                "progressability_score": progressability_score,
-                "confidence_score": (
-                    float(row["confidence_score"])
-                    if row["confidence_score"] is not None
-                    else fallback_confidence_score
-                ),
-                "confidence_grade": (
-                    str(row["confidence_grade"])
-                    if row["confidence_grade"]
-                    else fallback_confidence_grade
-                ),
-                "rank": int(row["rank"]) if row["rank"] is not None else None,
-                "novelty_level": row["novelty_level"] or "incremental",
-                "relation_tags": self._loads(row["relation_tags_json"]) or [],
-                "top_factors": self._loads(row["top_factors_json"]) or [],
-                "score_breakdown": self._loads(row["score_breakdown_json"]) or {},
-                "node_score_breakdown": self._loads(row["node_score_breakdown_json"])
-                or [],
-                "scoring_template_id": row["scoring_template_id"],
-                "scored_at": self._from_iso(row["scored_at"]),
-                "conclusion": row["conclusion"],
-                "key_supports": self._loads(row["key_supports_json"]),
-                "assumptions": self._loads(row["assumptions_json"]),
-                "risks": self._loads(row["risks_json"]),
-                "next_validation_action": row["next_validation_action"],
-                "conclusion_node_id": row["conclusion_node_id"],
-                "route_node_ids": self._loads(row["route_node_ids_json"]) or [],
-                "route_edge_ids": route_edge_ids,
-                "route_edge_ids_canonical_present": route_edge_ids_canonical_present,
-                "route_edge_ids_canonical_valid": route_edge_ids_canonical_valid,
-                "route_edge_ids_canonical_error": route_edge_ids_canonical_error,
-                "key_support_node_ids": self._loads(row["key_support_node_ids_json"])
-                or [],
-                "key_assumption_node_ids": self._loads(
-                    row["key_assumption_node_ids_json"]
-                )
-                or [],
-                "risk_node_ids": self._loads(row["risk_node_ids_json"]) or [],
-                "next_validation_node_id": row["next_validation_node_id"],
-                "version_id": row["version_id"],
-                "provider_backend": row["provider_backend"],
-                "provider_model": row["provider_model"],
-                "request_id": row["llm_request_id"],
-                "llm_response_id": row["llm_response_id"],
-                "usage": self._loads(row["usage_json"]) if row["usage_json"] else None,
-                "fallback_used": bool(row["fallback_used"] or 0),
-                "degraded": bool(row["degraded"] or 0),
-                "degraded_reason": row["degraded_reason"],
-                "summary_generation_mode": row["summary_generation_mode"] or "llm",
-                "key_strengths": self._loads(row["key_strengths_json"]) or [],
-                "key_risks": self._loads(row["key_risks_json"]) or [],
-                "open_questions": self._loads(row["open_questions_json"]) or [],
-            }
+                    "route_id": row["route_id"],
+                    "workspace_id": row["workspace_id"],
+                    "title": row["title"],
+                    "summary": row["summary"],
+                    "status": row["status"],
+                    "support_score": support_score,
+                    "risk_score": risk_score,
+                    "progressability_score": progressability_score,
+                    "confidence_score": (
+                        float(row["confidence_score"])
+                        if row["confidence_score"] is not None
+                        else fallback_confidence_score
+                    ),
+                    "confidence_grade": (
+                        str(row["confidence_grade"])
+                        if row["confidence_grade"]
+                        else fallback_confidence_grade
+                    ),
+                    "rank": int(row["rank"]) if row["rank"] is not None else None,
+                    "novelty_level": row["novelty_level"] or "incremental",
+                    "relation_tags": self._loads(row["relation_tags_json"]) or [],
+                    "top_factors": self._loads(row["top_factors_json"]) or [],
+                    "score_breakdown": self._loads(row["score_breakdown_json"]) or {},
+                    "node_score_breakdown": self._loads(
+                        row["node_score_breakdown_json"]
+                    )
+                    or [],
+                    "scoring_template_id": row["scoring_template_id"],
+                    "scored_at": self._from_iso(row["scored_at"]),
+                    "conclusion": row["conclusion"],
+                    "key_supports": self._loads(row["key_supports_json"]),
+                    "assumptions": self._loads(row["assumptions_json"]),
+                    "risks": self._loads(row["risks_json"]),
+                    "next_validation_action": row["next_validation_action"],
+                    "conclusion_node_id": row["conclusion_node_id"],
+                    "route_node_ids": self._loads(row["route_node_ids_json"]) or [],
+                    "route_edge_ids": route_edge_ids,
+                    "route_edge_ids_canonical_present": route_edge_ids_canonical_present,
+                    "route_edge_ids_canonical_valid": route_edge_ids_canonical_valid,
+                    "route_edge_ids_canonical_error": route_edge_ids_canonical_error,
+                    "key_support_node_ids": self._loads(
+                        row["key_support_node_ids_json"]
+                    )
+                    or [],
+                    "key_assumption_node_ids": self._loads(
+                        row["key_assumption_node_ids_json"]
+                    )
+                    or [],
+                    "risk_node_ids": self._loads(row["risk_node_ids_json"]) or [],
+                    "next_validation_node_id": row["next_validation_node_id"],
+                    "version_id": row["version_id"],
+                    "provider_backend": row["provider_backend"],
+                    "provider_model": row["provider_model"],
+                    "request_id": row["llm_request_id"],
+                    "llm_response_id": row["llm_response_id"],
+                    "usage": (
+                        self._loads(row["usage_json"]) if row["usage_json"] else None
+                    ),
+                    "fallback_used": bool(row["fallback_used"] or 0),
+                    "degraded": bool(row["degraded"] or 0),
+                    "degraded_reason": row["degraded_reason"],
+                    "summary_generation_mode": row["summary_generation_mode"] or "llm",
+                    "key_strengths": self._loads(row["key_strengths_json"]) or [],
+                    "key_risks": self._loads(row["key_risks_json"]) or [],
+                    "open_questions": self._loads(row["open_questions_json"]) or [],
+                }
             )
         return results
 
@@ -3370,7 +3415,9 @@ class ResearchApiStateStore:
         )
         return self.get_route(route_id)
 
-    def update_route_rank(self, *, route_id: str, rank: int) -> dict[str, object] | None:
+    def update_route_rank(
+        self, *, route_id: str, rank: int
+    ) -> dict[str, object] | None:
         self._execute("UPDATE routes SET rank = ? WHERE route_id = ?", (rank, route_id))
         return self.get_route(route_id)
 
@@ -3433,10 +3480,14 @@ class ResearchApiStateStore:
                             "created_at": row["created_at"],
                         },
                         "claim_id": (
-                            claims_by_candidate.get(str(row["candidate_id"]), {}).get("claim_id")
+                            claims_by_candidate.get(str(row["candidate_id"]), {}).get(
+                                "claim_id"
+                            )
                         ),
                         "claim_status": (
-                            claims_by_candidate.get(str(row["candidate_id"]), {}).get("status")
+                            claims_by_candidate.get(str(row["candidate_id"]), {}).get(
+                                "status"
+                            )
                         ),
                     }
                     for row in rows
@@ -3510,9 +3561,7 @@ class ResearchApiStateStore:
         self, ref_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM evidence_refs WHERE ref_id = ?",
-            (ref_id,),
-            conn=conn,
+            "SELECT * FROM evidence_refs WHERE ref_id = ?", (ref_id,), conn=conn
         )
         if row is None:
             return None
@@ -3634,18 +3683,14 @@ class ResearchApiStateStore:
 
     def get_scholarly_cache_record(self, cache_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM scholarly_source_cache WHERE cache_id = ?",
-            (cache_id,),
+            "SELECT * FROM scholarly_source_cache WHERE cache_id = ?", (cache_id,)
         )
         if row is None:
             return None
         return self._scholarly_cache_row_to_dict(row)
 
     def list_scholarly_cache_records(
-        self,
-        *,
-        normalized_query: str | None = None,
-        provider_name: str | None = None,
+        self, *, normalized_query: str | None = None, provider_name: str | None = None
     ) -> list[dict[str, object]]:
         query = "SELECT * FROM scholarly_source_cache WHERE 1=1"
         params: list[object] = []
@@ -3728,11 +3773,7 @@ class ResearchApiStateStore:
         for raw_ref in source_refs or []:
             if isinstance(raw_ref, dict):
                 normalized_source_refs.append(dict(raw_ref))
-        normalized_source_ref = (
-            dict(source_ref)
-            if isinstance(source_ref, dict)
-            else {}
-        )
+        normalized_source_ref = dict(source_ref) if isinstance(source_ref, dict) else {}
         self._execute(
             """
             INSERT INTO graph_nodes (
@@ -3767,9 +3808,7 @@ class ResearchApiStateStore:
         self, node_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM graph_nodes WHERE node_id = ?",
-            (node_id,),
-            conn=conn,
+            "SELECT * FROM graph_nodes WHERE node_id = ?", (node_id,), conn=conn
         )
         if row is None:
             return None
@@ -3840,9 +3879,7 @@ class ResearchApiStateStore:
         normalized_source_refs = node["source_refs"]
         if source_refs is not None:
             normalized_source_refs = [
-                dict(raw_ref)
-                for raw_ref in source_refs
-                if isinstance(raw_ref, dict)
+                dict(raw_ref) for raw_ref in source_refs if isinstance(raw_ref, dict)
             ]
         self._execute(
             """
@@ -3919,11 +3956,7 @@ class ResearchApiStateStore:
     ) -> dict[str, object]:
         edge_id = self.gen_id("edge")
         now = self._to_iso(self.now())
-        normalized_source_ref = (
-            dict(source_ref)
-            if isinstance(source_ref, dict)
-            else {}
-        )
+        normalized_source_ref = dict(source_ref) if isinstance(source_ref, dict) else {}
         self._execute(
             """
             INSERT INTO graph_edges (
@@ -3956,9 +3989,7 @@ class ResearchApiStateStore:
         self, edge_id: str, *, conn: sqlite3.Connection | None = None
     ) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM graph_edges WHERE edge_id = ?",
-            (edge_id,),
-            conn=conn,
+            "SELECT * FROM graph_edges WHERE edge_id = ?", (edge_id,), conn=conn
         )
         if row is None:
             return None
@@ -4268,18 +4299,11 @@ class ResearchApiStateStore:
             SET impact_summary_json = ?, impact_updated_at = ?
             WHERE failure_id = ?
             """,
-            (
-                self._dumps(impact_summary),
-                self._to_iso(impact_updated_at),
-                failure_id,
-            ),
+            (self._dumps(impact_summary), self._to_iso(impact_updated_at), failure_id),
         )
 
     def update_failure_provenance(
-        self,
-        *,
-        failure_id: str,
-        derived_from_validation_result_id: str | None,
+        self, *, failure_id: str, derived_from_validation_result_id: str | None
     ) -> None:
         self._execute(
             """
@@ -4318,8 +4342,7 @@ class ResearchApiStateStore:
             return None
         record = self._failure_row_to_dict(row)
         latest_snapshot = self._latest_failure_impact_snapshot(
-            workspace_id=str(record["workspace_id"]),
-            failure_id=failure_id,
+            workspace_id=str(record["workspace_id"]), failure_id=failure_id
         )
         if latest_snapshot is not None:
             impact_summary, impact_updated_at = latest_snapshot
@@ -4388,8 +4411,7 @@ class ResearchApiStateStore:
 
     def get_validation(self, validation_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM validations WHERE validation_id = ?",
-            (validation_id,),
+            "SELECT * FROM validations WHERE validation_id = ?", (validation_id,)
         )
         if row is None:
             return None
@@ -4654,22 +4676,16 @@ class ResearchApiStateStore:
         assert record is not None
         return record
 
-    def get_hypothesis_candidate_pool(
-        self, pool_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_candidate_pool(self, pool_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_candidate_pools WHERE pool_id = ?",
-            (pool_id,),
+            "SELECT * FROM hypothesis_candidate_pools WHERE pool_id = ?", (pool_id,)
         )
         if row is None:
             return None
         return self._hypothesis_candidate_pool_row_to_dict(row)
 
     def list_hypothesis_candidate_pools(
-        self,
-        *,
-        workspace_id: str | None = None,
-        status: str | None = None,
+        self, *, workspace_id: str | None = None, status: str | None = None
     ) -> list[dict[str, object]]:
         query = "SELECT * FROM hypothesis_candidate_pools WHERE 1=1"
         params: list[object] = []
@@ -4839,9 +4855,7 @@ class ResearchApiStateStore:
         assert record is not None
         return record
 
-    def get_hypothesis_candidate(
-        self, candidate_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_candidate(self, candidate_id: str) -> dict[str, object] | None:
         row = self._fetchone(
             "SELECT * FROM hypothesis_candidates WHERE candidate_id = ?",
             (candidate_id,),
@@ -4919,9 +4933,7 @@ class ResearchApiStateStore:
         )
         return self.get_hypothesis_candidate(candidate_id)
 
-    def _hypothesis_candidate_row_to_dict(
-        self, row: sqlite3.Row
-    ) -> dict[str, object]:
+    def _hypothesis_candidate_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
         return {
             "candidate_id": row["candidate_id"],
             "pool_id": row["pool_id"],
@@ -4994,18 +5006,14 @@ class ResearchApiStateStore:
 
     def get_hypothesis_round(self, round_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_rounds WHERE round_id = ?",
-            (round_id,),
+            "SELECT * FROM hypothesis_rounds WHERE round_id = ?", (round_id,)
         )
         if row is None:
             return None
         return self._hypothesis_round_row_to_dict(row)
 
     def list_hypothesis_rounds(
-        self,
-        *,
-        pool_id: str,
-        status: str | None = None,
+        self, *, pool_id: str, status: str | None = None
     ) -> list[dict[str, object]]:
         query = "SELECT * FROM hypothesis_rounds WHERE pool_id = ?"
         params: list[object] = [pool_id]
@@ -5121,8 +5129,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_review(self, review_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_reviews WHERE review_id = ?",
-            (review_id,),
+            "SELECT * FROM hypothesis_reviews WHERE review_id = ?", (review_id,)
         )
         if row is None:
             return None
@@ -5219,18 +5226,14 @@ class ResearchApiStateStore:
 
     def get_hypothesis_match(self, match_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_matches WHERE match_id = ?",
-            (match_id,),
+            "SELECT * FROM hypothesis_matches WHERE match_id = ?", (match_id,)
         )
         if row is None:
             return None
         return self._hypothesis_match_row_to_dict(row)
 
     def list_hypothesis_matches(
-        self,
-        *,
-        pool_id: str | None = None,
-        round_id: str | None = None,
+        self, *, pool_id: str | None = None, round_id: str | None = None
     ) -> list[dict[str, object]]:
         query = "SELECT * FROM hypothesis_matches WHERE 1=1"
         params: list[object] = []
@@ -5304,9 +5307,7 @@ class ResearchApiStateStore:
         assert record is not None
         return record
 
-    def get_hypothesis_evolution(
-        self, evolution_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_evolution(self, evolution_id: str) -> dict[str, object] | None:
         row = self._fetchone(
             "SELECT * FROM hypothesis_evolutions WHERE evolution_id = ?",
             (evolution_id,),
@@ -5337,9 +5338,7 @@ class ResearchApiStateStore:
         rows = self._fetchall(query, tuple(params))
         return [self._hypothesis_evolution_row_to_dict(row) for row in rows]
 
-    def _hypothesis_evolution_row_to_dict(
-        self, row: sqlite3.Row
-    ) -> dict[str, object]:
+    def _hypothesis_evolution_row_to_dict(self, row: sqlite3.Row) -> dict[str, object]:
         return {
             "evolution_id": row["evolution_id"],
             "pool_id": row["pool_id"],
@@ -5405,10 +5404,7 @@ class ResearchApiStateStore:
         return self._hypothesis_meta_review_row_to_dict(row)
 
     def list_hypothesis_meta_reviews(
-        self,
-        *,
-        pool_id: str | None = None,
-        round_id: str | None = None,
+        self, *, pool_id: str | None = None, round_id: str | None = None
     ) -> list[dict[str, object]]:
         query = "SELECT * FROM hypothesis_meta_reviews WHERE 1=1"
         params: list[object] = []
@@ -5448,15 +5444,17 @@ class ResearchApiStateStore:
         shared_trigger_ratio: float,
         shared_object_ratio: float,
         shared_chain_overlap: float,
+        trace_refs: dict[str, object] | None = None,
     ) -> dict[str, object]:
         edge_id = self.gen_id("hyp_edge")
         self._execute(
             """
             INSERT INTO hypothesis_proximity_edges (
                 edge_id, pool_id, from_candidate_id, to_candidate_id, similarity_score,
-                shared_trigger_ratio, shared_object_ratio, shared_chain_overlap, created_at
+                shared_trigger_ratio, shared_object_ratio, shared_chain_overlap,
+                trace_refs_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 edge_id,
@@ -5467,6 +5465,7 @@ class ResearchApiStateStore:
                 float(shared_trigger_ratio),
                 float(shared_object_ratio),
                 float(shared_chain_overlap),
+                self._dumps(trace_refs or {}),
                 self._to_iso(self.now()),
             ),
         )
@@ -5474,12 +5473,9 @@ class ResearchApiStateStore:
         assert record is not None
         return record
 
-    def get_hypothesis_proximity_edge(
-        self, edge_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_proximity_edge(self, edge_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_proximity_edges WHERE edge_id = ?",
-            (edge_id,),
+            "SELECT * FROM hypothesis_proximity_edges WHERE edge_id = ?", (edge_id,)
         )
         if row is None:
             return None
@@ -5519,6 +5515,7 @@ class ResearchApiStateStore:
             "shared_trigger_ratio": float(row["shared_trigger_ratio"] or 0.0),
             "shared_object_ratio": float(row["shared_object_ratio"] or 0.0),
             "shared_chain_overlap": float(row["shared_chain_overlap"] or 0.0),
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
             "created_at": self._from_iso(row["created_at"]),
         }
 
@@ -5675,12 +5672,9 @@ class ResearchApiStateStore:
         assert record is not None
         return record
 
-    def get_hypothesis_search_tree_edge(
-        self, edge_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_search_tree_edge(self, edge_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_search_tree_edges WHERE edge_id = ?",
-            (edge_id,),
+            "SELECT * FROM hypothesis_search_tree_edges WHERE edge_id = ?", (edge_id,)
         )
         if row is None:
             return None
@@ -6001,8 +5995,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_pool(self, pool_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_candidate_pools WHERE pool_id = ?",
-            (pool_id,),
+            "SELECT * FROM hypothesis_candidate_pools WHERE pool_id = ?", (pool_id,)
         )
         if row is None:
             return None
@@ -6156,9 +6149,7 @@ class ResearchApiStateStore:
             "rationale": row["rationale"],
             "trigger_refs": self._loads_list(row["trigger_refs_json"]),
             "related_object_ids": self._loads_list(row["related_object_ids_json"]),
-            "reasoning_chain": (
-                reasoning_chain if reasoning_chain is not None else {}
-            ),
+            "reasoning_chain": (reasoning_chain if reasoning_chain is not None else {}),
             "minimum_validation_action": self._loads_dict(
                 row["minimum_validation_action_json"]
             ),
@@ -6214,6 +6205,11 @@ class ResearchApiStateStore:
         self,
         *,
         candidate_id: str,
+        title: str | None = None,
+        statement: str | None = None,
+        summary: str | None = None,
+        rationale: str | None = None,
+        reasoning_chain: dict[str, object] | None = None,
         status: str | None = None,
         elo_rating: float | None = None,
         survival_score: float | None = None,
@@ -6225,10 +6221,20 @@ class ResearchApiStateStore:
         self._execute(
             """
             UPDATE hypothesis_candidates
-            SET status = ?, elo_rating = ?, survival_score = ?, lineage_json = ?, updated_at = ?
+            SET title = ?, statement = ?, summary = ?, rationale = ?, reasoning_chain_json = ?,
+                status = ?, elo_rating = ?, survival_score = ?, lineage_json = ?, updated_at = ?
             WHERE candidate_id = ?
             """,
             (
+                title if title is not None else current["title"],
+                statement if statement is not None else current["statement"],
+                summary if summary is not None else current["summary"],
+                rationale if rationale is not None else current["rationale"],
+                self._dumps(
+                    reasoning_chain
+                    if reasoning_chain is not None
+                    else current["reasoning_chain"]
+                ),
                 status if status is not None else current["status"],
                 float(elo_rating) if elo_rating is not None else current["elo_rating"],
                 (
@@ -6244,12 +6250,7 @@ class ResearchApiStateStore:
         return self.get_hypothesis_candidate(candidate_id)
 
     def create_hypothesis_round(
-        self,
-        *,
-        pool_id: str,
-        round_number: int,
-        status: str,
-        start_reason: str,
+        self, *, pool_id: str, round_number: int, status: str, start_reason: str
     ) -> dict[str, object]:
         round_id = self.gen_id("hyp_round")
         now = self._to_iso(self.now())
@@ -6281,8 +6282,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_round(self, round_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_rounds WHERE round_id = ?",
-            (round_id,),
+            "SELECT * FROM hypothesis_rounds WHERE round_id = ?", (round_id,)
         )
         if row is None:
             return None
@@ -6350,18 +6350,26 @@ class ResearchApiStateStore:
                     if generation_count is not None
                     else int(current["generation_count"])
                 ),
-                int(review_count)
-                if review_count is not None
-                else int(current["review_count"]),
-                int(match_count)
-                if match_count is not None
-                else int(current["match_count"]),
-                int(evolution_count)
-                if evolution_count is not None
-                else int(current["evolution_count"]),
-                meta_review_id
-                if meta_review_id is not None
-                else current["meta_review_id"],
+                (
+                    int(review_count)
+                    if review_count is not None
+                    else int(current["review_count"])
+                ),
+                (
+                    int(match_count)
+                    if match_count is not None
+                    else int(current["match_count"])
+                ),
+                (
+                    int(evolution_count)
+                    if evolution_count is not None
+                    else int(current["evolution_count"])
+                ),
+                (
+                    meta_review_id
+                    if meta_review_id is not None
+                    else current["meta_review_id"]
+                ),
                 self._to_iso(self.now()) if completed else current["completed_at"],
                 round_id,
             ),
@@ -6437,8 +6445,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_review(self, review_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_reviews WHERE review_id = ?",
-            (review_id,),
+            "SELECT * FROM hypothesis_reviews WHERE review_id = ?", (review_id,)
         )
         if row is None:
             return None
@@ -6533,8 +6540,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_match(self, match_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_matches WHERE match_id = ?",
-            (match_id,),
+            "SELECT * FROM hypothesis_matches WHERE match_id = ?", (match_id,)
         )
         if row is None:
             return None
@@ -6598,6 +6604,7 @@ class ResearchApiStateStore:
         change_summary: str,
         preserved_claims: list[str],
         modified_claims: list[str],
+        trace_refs: dict[str, object] | None = None,
     ) -> dict[str, object]:
         evolution_id = self.gen_id("hyp_evo")
         self._execute(
@@ -6605,9 +6612,9 @@ class ResearchApiStateStore:
             INSERT INTO hypothesis_evolutions (
                 evolution_id, pool_id, round_id, source_candidate_id, new_candidate_id,
                 evolution_mode, driving_review_ids_json, change_summary,
-                preserved_claims_json, modified_claims_json, created_at
+                preserved_claims_json, modified_claims_json, trace_refs_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evolution_id,
@@ -6620,6 +6627,7 @@ class ResearchApiStateStore:
                 change_summary,
                 self._dumps(preserved_claims),
                 self._dumps(modified_claims),
+                self._dumps(trace_refs or {}),
                 self._to_iso(self.now()),
             ),
         )
@@ -6643,6 +6651,7 @@ class ResearchApiStateStore:
             "change_summary": row["change_summary"],
             "preserved_claims": self._loads_list(row["preserved_claims_json"]),
             "modified_claims": self._loads_list(row["modified_claims_json"]),
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
             "created_at": self._from_iso(row["created_at"]),
         }
 
@@ -6687,15 +6696,17 @@ class ResearchApiStateStore:
         continue_recommendation: str,
         stop_recommendation: str,
         diversity_assessment: str,
+        trace_refs: dict[str, object] | None = None,
     ) -> dict[str, object]:
         meta_review_id = self.gen_id("hyp_meta")
         self._execute(
             """
             INSERT INTO hypothesis_meta_reviews (
                 meta_review_id, pool_id, round_id, recurring_issues_json, strong_patterns_json,
-                weak_patterns_json, continue_recommendation, stop_recommendation, diversity_assessment, created_at
+                weak_patterns_json, continue_recommendation, stop_recommendation,
+                diversity_assessment, trace_refs_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 meta_review_id,
@@ -6707,6 +6718,7 @@ class ResearchApiStateStore:
                 continue_recommendation,
                 stop_recommendation,
                 diversity_assessment,
+                self._dumps(trace_refs or {}),
                 self._to_iso(self.now()),
             ),
         )
@@ -6731,6 +6743,7 @@ class ResearchApiStateStore:
             "continue_recommendation": row["continue_recommendation"],
             "stop_recommendation": row["stop_recommendation"],
             "diversity_assessment": row["diversity_assessment"],
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
             "created_at": self._from_iso(row["created_at"]),
         }
 
@@ -6774,15 +6787,17 @@ class ResearchApiStateStore:
         shared_trigger_ratio: float,
         shared_object_ratio: float,
         shared_chain_overlap: float,
+        trace_refs: dict[str, object] | None = None,
     ) -> dict[str, object]:
         edge_id = self.gen_id("hyp_prox")
         self._execute(
             """
             INSERT INTO hypothesis_proximity_edges (
                 edge_id, pool_id, from_candidate_id, to_candidate_id, similarity_score,
-                shared_trigger_ratio, shared_object_ratio, shared_chain_overlap, created_at
+                shared_trigger_ratio, shared_object_ratio, shared_chain_overlap,
+                trace_refs_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 edge_id,
@@ -6793,6 +6808,7 @@ class ResearchApiStateStore:
                 float(shared_trigger_ratio),
                 float(shared_object_ratio),
                 float(shared_chain_overlap),
+                self._dumps(trace_refs or {}),
                 self._to_iso(self.now()),
             ),
         )
@@ -6800,8 +6816,7 @@ class ResearchApiStateStore:
 
     def get_hypothesis_proximity_edge(self, edge_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_proximity_edges WHERE edge_id = ?",
-            (edge_id,),
+            "SELECT * FROM hypothesis_proximity_edges WHERE edge_id = ?", (edge_id,)
         )
         if row is None:
             return None
@@ -6814,10 +6829,13 @@ class ResearchApiStateStore:
             "shared_trigger_ratio": float(row["shared_trigger_ratio"] or 0.0),
             "shared_object_ratio": float(row["shared_object_ratio"] or 0.0),
             "shared_chain_overlap": float(row["shared_chain_overlap"] or 0.0),
+            "trace_refs": self._loads_dict(row["trace_refs_json"]),
             "created_at": self._from_iso(row["created_at"]),
         }
 
-    def list_hypothesis_proximity_edges(self, *, pool_id: str) -> list[dict[str, object]]:
+    def list_hypothesis_proximity_edges(
+        self, *, pool_id: str
+    ) -> list[dict[str, object]]:
         rows = self._fetchall(
             """
             SELECT edge_id
@@ -6884,8 +6902,7 @@ class ResearchApiStateStore:
         if row is None:
             return None
         child_edges = self.list_hypothesis_search_tree_edges(
-            pool_id=str(row["pool_id"]),
-            from_tree_node_id=str(row["tree_node_id"]),
+            pool_id=str(row["pool_id"]), from_tree_node_id=str(row["tree_node_id"])
         )
         return {
             "tree_node_id": row["tree_node_id"],
@@ -6947,9 +6964,11 @@ class ResearchApiStateStore:
                     if mean_reward is not None
                     else float(current["mean_reward"])
                 ),
-                float(uct_score)
-                if uct_score is not None
-                else float(current["uct_score"]),
+                (
+                    float(uct_score)
+                    if uct_score is not None
+                    else float(current["uct_score"])
+                ),
                 status if status is not None else current["status"],
                 self._to_iso(self.now()),
                 tree_node_id,
@@ -6984,12 +7003,9 @@ class ResearchApiStateStore:
         )
         return self.get_hypothesis_search_tree_edge(edge_id)
 
-    def get_hypothesis_search_tree_edge(
-        self, edge_id: str
-    ) -> dict[str, object] | None:
+    def get_hypothesis_search_tree_edge(self, edge_id: str) -> dict[str, object] | None:
         row = self._fetchone(
-            "SELECT * FROM hypothesis_search_tree_edges WHERE edge_id = ?",
-            (edge_id,),
+            "SELECT * FROM hypothesis_search_tree_edges WHERE edge_id = ?", (edge_id,)
         )
         if row is None:
             return None
@@ -7003,10 +7019,7 @@ class ResearchApiStateStore:
         }
 
     def list_hypothesis_search_tree_edges(
-        self,
-        *,
-        pool_id: str,
-        from_tree_node_id: str | None = None,
+        self, *, pool_id: str, from_tree_node_id: str | None = None
     ) -> list[dict[str, object]]:
         if from_tree_node_id is None:
             rows = self._fetchall(
@@ -7034,6 +7047,120 @@ class ResearchApiStateStore:
             if item is not None:
                 items.append(item)
         return items
+
+    def create_hypothesis_agent_transcript(
+        self,
+        *,
+        pool_id: str,
+        round_id: str | None,
+        candidate_id: str | None = None,
+        match_id: str | None = None,
+        agent_name: str,
+        agent_role: str,
+        prompt_template: str,
+        input_payload: dict[str, object],
+        output_payload: dict[str, object] | list[object] | None,
+        provider: str | None,
+        model: str | None,
+        token_usage: dict[str, object] | None,
+        latency_ms: int,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, object]:
+        transcript_id = self.gen_id("hyp_tx")
+        self._execute(
+            """
+            INSERT INTO hypothesis_agent_transcripts (
+                transcript_id, pool_id, round_id, candidate_id, match_id,
+                agent_name, agent_role, prompt_template, input_payload_json,
+                output_payload_json, provider, model, token_usage_json, latency_ms,
+                status, error_code, error_message, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                transcript_id,
+                pool_id,
+                round_id,
+                candidate_id,
+                match_id,
+                agent_name,
+                agent_role,
+                prompt_template,
+                self._dumps(input_payload),
+                self._dumps(output_payload if output_payload is not None else {}),
+                provider,
+                model,
+                self._dumps(token_usage or {}),
+                int(latency_ms),
+                status,
+                error_code,
+                error_message,
+                self._to_iso(self.now()),
+            ),
+        )
+        record = self.get_hypothesis_agent_transcript(transcript_id)
+        assert record is not None
+        return record
+
+    def get_hypothesis_agent_transcript(
+        self, transcript_id: str
+    ) -> dict[str, object] | None:
+        row = self._fetchone(
+            "SELECT * FROM hypothesis_agent_transcripts WHERE transcript_id = ?",
+            (transcript_id,),
+        )
+        if row is None:
+            return None
+        return self._hypothesis_agent_transcript_row_to_dict(row)
+
+    def list_hypothesis_agent_transcripts(
+        self,
+        *,
+        pool_id: str,
+        round_id: str | None = None,
+        candidate_id: str | None = None,
+        match_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        query = "SELECT * FROM hypothesis_agent_transcripts WHERE pool_id = ?"
+        params: list[object] = [pool_id]
+        if round_id is not None:
+            query += " AND round_id = ?"
+            params.append(round_id)
+        if candidate_id is not None:
+            query += " AND candidate_id = ?"
+            params.append(candidate_id)
+        if match_id is not None:
+            query += " AND match_id = ?"
+            params.append(match_id)
+        query += " ORDER BY created_at ASC, transcript_id ASC"
+        rows = self._fetchall(query, tuple(params))
+        return [self._hypothesis_agent_transcript_row_to_dict(row) for row in rows]
+
+    def _hypothesis_agent_transcript_row_to_dict(
+        self, row: sqlite3.Row
+    ) -> dict[str, object]:
+        return {
+            "transcript_id": row["transcript_id"],
+            "pool_id": row["pool_id"],
+            "round_id": row["round_id"],
+            "candidate_id": row["candidate_id"],
+            "match_id": row["match_id"],
+            "agent_name": row["agent_name"],
+            "agent_role": row["agent_role"],
+            "prompt_template": row["prompt_template"],
+            "input_payload": self._loads_dict(row["input_payload_json"]),
+            "output_payload": self._loads_safe(row["output_payload_json"]) or {},
+            "provider": row["provider"],
+            "model": row["model"],
+            "token_usage": self._loads_dict(row["token_usage_json"]),
+            "latency_ms": int(row["latency_ms"] or 0),
+            "status": row["status"],
+            "error_code": row["error_code"],
+            "error_message": row["error_message"],
+            "created_at": self._from_iso(row["created_at"]),
+        }
 
     def create_package(
         self,

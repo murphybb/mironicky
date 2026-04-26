@@ -12,6 +12,7 @@ import {
   getGraphSupportChains,
   importSource,
   generateLiteratureFrontierHypothesis,
+  listHypothesisPoolTranscripts,
   listWorkspaces,
   patchHypothesisCandidate,
 } from './api.ts';
@@ -234,4 +235,53 @@ test('hypothesis pool control and candidate patch wrappers call backend endpoint
   );
   assert.equal(calls[0].body.action, 'pause');
   assert.equal(calls[1].body.reasoning_chain.hypothesis_level_conclusion, 'new conclusion');
+});
+
+test('hypothesis pool transcript wrapper calls backend transcript endpoint', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+
+  await withMockFetch(
+    (url, init) => {
+      calls.push({
+        url,
+        method: String(init?.method || 'GET'),
+      });
+      return {
+        items: [
+          {
+            transcript_id: 'tx_1',
+            pool_id: 'pool_1',
+            round_id: 'round_1',
+            candidate_id: 'candidate_1',
+            match_id: null,
+            agent_name: 'GenerationAgent',
+            agent_role: 'generation',
+            prompt_template: 'generation.txt',
+            input_payload: {},
+            output_payload: {},
+            model: 'test-model',
+            provider: 'test-provider',
+            token_usage: {},
+            latency_ms: 12,
+            status: 'completed',
+            error_code: null,
+            error_message: null,
+            created_at: '2026-04-24T00:00:00',
+          },
+        ],
+        total: 1,
+      };
+    },
+    async () => {
+      const result = await listHypothesisPoolTranscripts('pool_1');
+      assert.equal(result.items[0].agent_role, 'generation');
+    }
+  );
+
+  assert.deepEqual(calls, [
+    {
+      method: 'GET',
+      url: '/api/v1/research/hypotheses/pools/pool_1/transcripts',
+    },
+  ]);
 });

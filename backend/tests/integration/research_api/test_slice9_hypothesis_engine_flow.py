@@ -100,31 +100,34 @@ def _import_extract_confirm_all(
 def _prepare_workspace_with_hypothesis_triggers(
     client: TestClient, workspace_id: str
 ) -> str:
-    _import_extract_confirm_all(
-        client,
+    del client
+    evidence_node = STORE.create_graph_node(
         workspace_id=workspace_id,
-        title="slice9 source 1",
-        content="Claim: retrieval boosts recall. Assumption: cache is warm. Validation: run targeted benchmark.",
+        node_type="evidence",
+        object_ref_type="source_claim",
+        object_ref_id="claim_slice9_evidence",
+        short_label="Retrieval Recall Evidence",
+        full_description="Claim: retrieval boosts recall when cache is warm.",
+        status="active",
     )
-    _import_extract_confirm_all(
-        client,
+    conflict_node = STORE.create_graph_node(
         workspace_id=workspace_id,
-        title="slice9 source 2",
-        content="Conflict: latency regresses under load. Failure: timeout spikes on shard imbalance.",
+        node_type="conflict",
+        object_ref_type="conflict",
+        object_ref_id="conflict_slice9_latency",
+        short_label="Latency Conflict",
+        full_description="Conflict: latency regresses under load.",
+        status="active",
     )
-    built = client.post(
-        f"/api/v1/research/graph/{workspace_id}/build",
-        headers={"x-request-id": "req_slice9_graph_build"},
+    gap_node = STORE.create_graph_node(
+        workspace_id=workspace_id,
+        node_type="gap",
+        object_ref_type="failure_gap",
+        object_ref_id="gap_slice9_timeout",
+        short_label="Timeout Gap",
+        full_description="Failure: timeout spikes on shard imbalance.",
+        status="active",
     )
-    assert built.status_code == 200
-
-    graph = client.get(f"/api/v1/research/graph/{workspace_id}")
-    assert graph.status_code == 200
-    target_node = next(
-        node for node in graph.json()["nodes"] if node["node_type"] == "evidence"
-    )
-    graph_workspace = STORE.get_graph_workspace(workspace_id)
-    assert graph_workspace is not None
     route = STORE.create_route(
         workspace_id=workspace_id,
         title="slice9 weak support seed route",
@@ -138,12 +141,28 @@ def _prepare_workspace_with_hypothesis_triggers(
         assumptions=["seed assumption"],
         risks=["seed risk"],
         next_validation_action="run focused support benchmark",
-        route_node_ids=[str(target_node["node_id"])],
-        key_support_node_ids=[str(target_node["node_id"])],
+        route_node_ids=[
+            str(evidence_node["node_id"]),
+            str(conflict_node["node_id"]),
+            str(gap_node["node_id"]),
+        ],
+        key_support_node_ids=[str(evidence_node["node_id"])],
         key_assumption_node_ids=[],
-        risk_node_ids=[str(target_node["node_id"])],
-        conclusion_node_id=str(target_node["node_id"]),
-        version_id=str(graph_workspace.get("latest_version_id") or ""),
+        risk_node_ids=[str(conflict_node["node_id"])],
+        conclusion_node_id=str(evidence_node["node_id"]),
+        version_id="ver_slice9_hypothesis_seed",
+    )
+    STORE.create_failure(
+        workspace_id=workspace_id,
+        attached_targets=[
+            {"target_type": "node", "target_id": str(gap_node["node_id"])},
+            {"target_type": "route", "target_id": str(route["route_id"])},
+        ],
+        observed_outcome="timeout spikes on shard imbalance",
+        expected_difference="stable latency under load",
+        failure_reason="seeded integration failure reason",
+        severity="high",
+        reporter="slice9_integration",
     )
     return str(route["route_id"])
 
@@ -161,7 +180,7 @@ def test_slice9_dev_console_exposes_hypothesis_controls() -> None:
     assert "Defer Hypothesis" in response.text
 
 
-def test_slice9_hypothesis_invalid_json_fallback_marks_degraded() -> None:
+def test_slice9_hypothesis_invalid_json_fails_without_deterministic_fallback() -> None:
     client = _build_test_client()
     workspace_id = "ws_slice9_hypothesis_invalid_json_fallback"
     request_id = "req_slice9_hypothesis_invalid_json_fallback"
@@ -189,39 +208,30 @@ def test_slice9_hypothesis_invalid_json_fallback_marks_degraded() -> None:
     )
     assert generated.status_code == 202, generated.text
     job_payload = wait_for_job_terminal(client, job_id=str(generated.json()["job_id"]))
-    assert job_payload["status"] == "succeeded"
-    assert job_payload["result_ref"]["resource_type"] == "hypothesis"
+    assert job_payload["status"] == "failed"
+    assert job_payload["error"]["error_code"] == "research.llm_invalid_output"
 
-    hypothesis_id = str(job_payload["result_ref"]["resource_id"])
-    hypothesis = client.get(f"/api/v1/research/hypotheses/{hypothesis_id}")
-    assert hypothesis.status_code == 200, hypothesis.text
-    hypothesis_payload = hypothesis.json()
-    assert hypothesis_payload["status"] == "candidate"
-    assert hypothesis_payload["title"]
-    assert hypothesis_payload["statement"]
-    assert hypothesis_payload["rationale"]
-    assert hypothesis_payload["trigger_refs"][0]["trigger_id"] == selected_trigger_id
-    assert hypothesis_payload["fallback_used"] is True
-    assert hypothesis_payload["degraded"] is True
-    assert hypothesis_payload["degraded_reason"] == "research.llm_invalid_output"
+    hypotheses = client.get(
+        "/api/v1/research/hypotheses", params={"workspace_id": workspace_id}
+    )
+    assert hypotheses.status_code == 200
+    assert hypotheses.json()["items"] == []
 
     with sqlite3.connect(STORE.db_path) as conn:
         row = conn.execute(
             """
-            SELECT metrics_json
+            SELECT error_json
             FROM research_events
             WHERE workspace_id = ?
               AND request_id = ?
               AND event_name = 'hypothesis_generation_completed'
-              AND status = 'completed'
+              AND status = 'failed'
             ORDER BY timestamp DESC, event_id DESC
             LIMIT 1
             """,
             (workspace_id, request_id),
         ).fetchone()
     assert row is not None
-    assert '"fallback_used": true' in row[0]
-    assert '"degraded": true' in row[0]
     assert "research.llm_invalid_output" in row[0]
 
 

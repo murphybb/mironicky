@@ -22,6 +22,10 @@ from research_layer.services.research_llm_dependencies import (
     build_research_llm_gateway,
     resolve_research_backend_and_model,
 )
+from research_layer.services.retrieval_views_service import (
+    ResearchRetrievalService,
+    RetrievalServiceError,
+)
 from research_layer.services.tool_capability_graph_service import (
     ToolCapabilityGraphService,
 )
@@ -40,11 +44,6 @@ class HypothesisServiceError(Exception):
 
 class HypothesisService:
     _DECISION_ALLOWED_FROM = {"candidate", "deferred"}
-    _DETERMINISTIC_FALLBACK_ERROR_CODES = {
-        "research.llm_failed",
-        "research.llm_timeout",
-        "research.llm_invalid_output",
-    }
     _MEMORY_TRIGGER_TYPE_BY_VIEW = {
         "evidence": "weak_support",
         "contradiction": "conflict",
@@ -61,7 +60,9 @@ class HypothesisService:
         self._tool_capability_graph = ToolCapabilityGraphService()
         orchestrator = getattr(store, "_hypothesis_multi_orchestrator", None)
         if orchestrator is None:
-            orchestrator = HypothesisMultiAgentOrchestrator(store)
+            orchestrator = HypothesisMultiAgentOrchestrator(
+                store, llm_gateway=self._llm_gateway
+            )
             setattr(store, "_hypothesis_multi_orchestrator", orchestrator)
         self._multi_orchestrator = orchestrator
 
@@ -95,6 +96,50 @@ class HypothesisService:
     def list_pool_rounds(self, *, pool_id: str) -> list[dict[str, object]]:
         return self._multi_orchestrator.list_pool_rounds(pool_id=pool_id)
 
+    def get_pool_trajectory(self, *, pool_id: str) -> dict[str, object] | None:
+        pool = self._multi_orchestrator.get_pool(pool_id=pool_id)
+        if pool is None:
+            return None
+        candidates = self._multi_orchestrator.list_pool_candidates(pool_id=pool_id)
+        rounds = self._store.list_hypothesis_rounds(pool_id=pool_id)
+        matches = self._store.list_hypothesis_matches(pool_id=pool_id)
+        evolutions = self._store.list_hypothesis_evolutions(pool_id=pool_id)
+        meta_reviews = self._store.list_hypothesis_meta_reviews(pool_id=pool_id)
+        transcripts = self._store.list_hypothesis_agent_transcripts(pool_id=pool_id)
+        proximity_edges = self._store.list_hypothesis_proximity_edges(pool_id=pool_id)
+        chronological_events = self._build_pool_trajectory_events(
+            pool=pool,
+            rounds=rounds,
+            candidates=candidates,
+            transcripts=transcripts,
+            matches=matches,
+            evolutions=evolutions,
+            meta_reviews=meta_reviews,
+            proximity_edges=proximity_edges,
+        )
+        return {
+            "pool_id": pool_id,
+            "pool": pool,
+            "chronological_events": chronological_events,
+            "candidate_lineage": self._build_candidate_lineage(
+                candidates=candidates,
+                transcripts=transcripts,
+                matches=matches,
+                evolutions=evolutions,
+            ),
+            "service_traces": {
+                "retrieval": (pool.get("preference_profile") or {}).get(
+                    "active_retrieval_trace"
+                ),
+                "proximity": (pool.get("reasoning_subgraph") or {}).get(
+                    "latest_proximity_trace"
+                ),
+                "frontier_selection": (pool.get("reasoning_subgraph") or {}).get(
+                    "frontier_selection_trace"
+                ),
+            },
+        }
+
     def get_pool_match(self, *, match_id: str) -> dict[str, object] | None:
         return self._multi_orchestrator.get_match(match_id=match_id)
 
@@ -112,8 +157,12 @@ class HypothesisService:
         request_id: str,
         action: str,
         source_ids: list[str],
+        candidate_id: str | None = None,
+        node: dict[str, object] | None = None,
+        candidate_patch: dict[str, object] | None = None,
+        user_hypothesis: dict[str, object] | None = None,
+        control_reason: str | None = None,
     ) -> dict[str, object]:
-        del source_ids
         pool = self._multi_orchestrator.get_pool(pool_id=pool_id)
         if pool is None:
             self._raise(
@@ -130,11 +179,28 @@ class HypothesisService:
                 details={"pool_id": pool_id},
             )
         try:
-            updated = self._multi_orchestrator.control_pool(
-                pool_id=pool_id,
-                request_id=request_id,
-                action=action,
-            )
+            if action in {
+                "edit_reasoning_node",
+                "delete_reasoning_node",
+                "add_reasoning_node",
+                "edit_candidate",
+                "add_user_hypothesis",
+            }:
+                updated = self._multi_orchestrator.apply_user_intervention(
+                    pool_id=pool_id,
+                    request_id=request_id,
+                    action=action,
+                    candidate_id=candidate_id,
+                    node=node,
+                    candidate_patch=candidate_patch,
+                    user_hypothesis=user_hypothesis,
+                    control_reason=control_reason,
+                )
+            else:
+                del source_ids
+                updated = self._multi_orchestrator.control_pool(
+                    pool_id=pool_id, request_id=request_id, action=action
+                )
         except ValueError as exc:
             self._raise(
                 status_code=409,
@@ -142,6 +208,20 @@ class HypothesisService:
                 message="pool control action failed",
                 details={"pool_id": pool_id, "action": action, "reason": str(exc)},
             )
+        self._store.emit_event(
+            event_name="hypothesis_pool_control_applied",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            component="hypothesis_service",
+            step="pool_control",
+            status="completed",
+            refs={
+                "pool_id": pool_id,
+                "action": action,
+                "candidate_id": candidate_id or "",
+            },
+        )
         return updated
 
     def patch_candidate_reasoning_chain(
@@ -170,6 +250,7 @@ class HypothesisService:
             )
         candidate = self._multi_orchestrator.patch_candidate_reasoning_chain(
             candidate_id=candidate_id,
+            request_id=request_id,
             reasoning_chain=reasoning_chain,
             reset_review_state=reset_review_state,
         )
@@ -210,6 +291,7 @@ class HypothesisService:
         preference_profile: dict[str, object],
         failure_mode: str | None,
         allow_fallback: bool,
+        active_retrieval: dict[str, object] | None = None,
     ) -> dict[str, object]:
         del failure_mode, allow_fallback
         if not trigger_ids:
@@ -240,6 +322,25 @@ class HypothesisService:
             novelty_typing=novelty_typing,
         )
         weakening_signal = self._build_weakening_signal(triggers=resolved_triggers)
+        retrieval_trace = self._run_active_retrieval_trace(
+            workspace_id=workspace_id,
+            request_id=request_id,
+            research_goal=research_goal,
+            active_retrieval=active_retrieval or {},
+            failure_details={
+                "trigger_ids": trigger_ids,
+                "source_ids": self._source_ids_from_trigger_refs(resolved_triggers),
+            },
+        )
+        pool_preference_profile = {
+            **preference_profile,
+            "active_retrieval": dict(active_retrieval or {"enabled": False}),
+            **(
+                {"active_retrieval_trace": retrieval_trace}
+                if retrieval_trace is not None
+                else {}
+            ),
+        }
         try:
             pool = await self._multi_orchestrator.create_pool(
                 workspace_id=workspace_id,
@@ -250,11 +351,18 @@ class HypothesisService:
                 max_rounds=max_rounds,
                 candidate_count=candidate_count,
                 constraints=constraints,
-                preference_profile=preference_profile,
+                preference_profile=pool_preference_profile,
                 novelty_typing=novelty_typing,
                 related_object_ids=related_object_ids,
                 minimum_validation_action=minimum_validation_action,
                 weakening_signal=weakening_signal,
+            )
+        except ResearchLLMError as exc:
+            self._raise(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message=exc.message,
+                details=exc.details,
             )
         except ValueError as exc:
             self._raise(
@@ -308,8 +416,7 @@ class HypothesisService:
                 message="source_ids must not be empty",
             )
         trigger_refs = self._build_literature_trigger_refs(
-            workspace_id=workspace_id,
-            source_ids=canonical_source_ids,
+            workspace_id=workspace_id, source_ids=canonical_source_ids
         )
         if not trigger_refs:
             self._raise(
@@ -328,6 +435,13 @@ class HypothesisService:
             novelty_typing="literature_frontier",
         )
         weakening_signal = self._build_weakening_signal(triggers=trigger_refs)
+        active_retrieval_trace = self._run_active_retrieval_trace(
+            workspace_id=workspace_id,
+            request_id=request_id,
+            research_goal=research_goal,
+            active_retrieval=active_retrieval,
+            failure_details={"source_ids": canonical_source_ids},
+        )
         try:
             pool = await self._multi_orchestrator.create_pool(
                 workspace_id=workspace_id,
@@ -341,12 +455,24 @@ class HypothesisService:
                 preference_profile={
                     **preference_profile,
                     "active_retrieval": dict(active_retrieval),
+                    **(
+                        {"active_retrieval_trace": active_retrieval_trace}
+                        if active_retrieval_trace is not None
+                        else {}
+                    ),
                 },
                 novelty_typing="literature_frontier",
                 related_object_ids=related_object_ids,
                 minimum_validation_action=minimum_validation_action,
                 weakening_signal=weakening_signal,
                 orchestration_mode="literature_frontier",
+            )
+        except ResearchLLMError as exc:
+            self._raise(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message=exc.message,
+                details=exc.details,
             )
         except ValueError as exc:
             self._raise(
@@ -376,13 +502,368 @@ class HypothesisService:
         )
         return pool
 
-    async def run_pool_round(
+    def _run_active_retrieval_trace(
         self,
         *,
-        pool_id: str,
         workspace_id: str,
         request_id: str,
-        max_matches: int,
+        research_goal: str,
+        active_retrieval: dict[str, object],
+        failure_details: dict[str, object],
+    ) -> dict[str, object] | None:
+        if not bool(active_retrieval.get("enabled", False)):
+            return None
+        try:
+            retrieval = ResearchRetrievalService(self._store).retrieve(
+                workspace_id=workspace_id,
+                view_type="evidence",
+                query=research_goal,
+                retrieve_method="hybrid",
+                top_k=int(active_retrieval.get("max_papers_per_burst") or 3),
+                metadata_filters={},
+                request_id=request_id,
+            )
+        except RetrievalServiceError as exc:
+            self._raise(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message="active retrieval failed before hypothesis pool run",
+                details={
+                    **failure_details,
+                    "retrieval_error": {
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                        "details": exc.details,
+                    },
+                },
+            )
+        return {
+            "status": "completed",
+            "service": "ResearchRetrievalService",
+            "query_intent": research_goal,
+            "trigger_source": active_retrieval.get(
+                "trigger_source", "supervisor_active_retrieval"
+            ),
+            "view_type": retrieval.get("view_type"),
+            "retrieve_method": retrieval.get("retrieve_method"),
+            "total": retrieval.get("total"),
+            "query_ref": retrieval.get("query_ref"),
+            "items": retrieval.get("items", []),
+            "evidence_packets": self._build_retrieval_evidence_packets(
+                retrieval_items=retrieval.get("items", []),
+                uploaded_source_ids=self._uploaded_source_ids(
+                    workspace_id=workspace_id,
+                    failure_details=failure_details,
+                ),
+                research_goal=research_goal,
+                trigger_source=str(
+                    active_retrieval.get(
+                        "trigger_source", "supervisor_active_retrieval"
+                    )
+                ),
+            ),
+        }
+
+    def _uploaded_source_ids(
+        self, *, workspace_id: str, failure_details: dict[str, object]
+    ) -> set[str]:
+        uploaded = {
+            str(source.get("source_id"))
+            for source in self._store.list_sources(workspace_id=workspace_id)
+            if str(source.get("source_id") or "").strip()
+        }
+        raw_source_ids = failure_details.get("source_ids")
+        if isinstance(raw_source_ids, list):
+            uploaded.update(str(item) for item in raw_source_ids if str(item).strip())
+        return uploaded
+
+    @staticmethod
+    def _source_ids_from_trigger_refs(
+        trigger_refs: list[dict[str, object]]
+    ) -> list[str]:
+        source_ids: list[str] = []
+        for trigger in trigger_refs:
+            trace_refs = trigger.get("trace_refs")
+            if isinstance(trace_refs, dict) and trace_refs.get("source_id"):
+                source_ids.append(str(trace_refs["source_id"]))
+        return source_ids
+
+    def _build_retrieval_evidence_packets(
+        self,
+        *,
+        retrieval_items: object,
+        uploaded_source_ids: set[str],
+        research_goal: str,
+        trigger_source: str,
+    ) -> list[dict[str, object]]:
+        if not isinstance(retrieval_items, list):
+            return []
+        packets: list[dict[str, object]] = []
+        for index, item in enumerate(retrieval_items):
+            if not isinstance(item, dict):
+                continue
+            trace_refs = item.get("trace_refs")
+            trace_refs_dict = trace_refs if isinstance(trace_refs, dict) else {}
+            source_ref = item.get("source_ref")
+            if not isinstance(source_ref, dict):
+                source_ref = trace_refs_dict.get("source_ref")
+            source_ref_dict = source_ref if isinstance(source_ref, dict) else {}
+            source_id = str(source_ref_dict.get("source_id") or "").strip()
+            origin = "uploaded" if source_id and source_id in uploaded_source_ids else "supplemental"
+            evidence_refs = item.get("evidence_refs")
+            evidence_refs_list = evidence_refs if isinstance(evidence_refs, list) else []
+            highlight_spans = item.get("evidence_highlight_spans")
+            highlight_spans_list = (
+                highlight_spans if isinstance(highlight_spans, list) else []
+            )
+            explicit_status = str(
+                item.get("citation_verification_status") or ""
+            ).strip()
+            if explicit_status:
+                citation_status = explicit_status
+            elif origin == "uploaded" or evidence_refs_list or highlight_spans_list:
+                citation_status = "verified"
+            else:
+                citation_status = "unverified"
+            result_id = str(item.get("result_id") or f"retrieval_item_{index + 1}")
+            packets.append(
+                {
+                    "packet_id": f"evidence_packet:{result_id}",
+                    "result_id": result_id,
+                    "retrieval_origin": origin,
+                    "query_intent": research_goal,
+                    "trigger_source": trigger_source,
+                    "retrieved_paper_metadata": {
+                        "title": item.get("title"),
+                        "source_ref": source_ref_dict,
+                        "supporting_refs": item.get("supporting_refs") or {},
+                    },
+                    "source_id": source_id or None,
+                    "source_span": self._source_span_from_retrieval_item(item),
+                    "chunk_refs": self._chunk_refs_from_retrieval_item(item),
+                    "rerank_score": item.get("score"),
+                    "citation_verification_status": citation_status,
+                    "failure_state": (
+                        "citation_unverified"
+                        if citation_status not in {"verified", "uploaded_verified"}
+                        else None
+                    ),
+                    "snippet": item.get("snippet"),
+                    "evidence_refs": evidence_refs_list,
+                    "trace_refs": trace_refs_dict,
+                }
+            )
+        return packets
+
+    def _source_span_from_retrieval_item(
+        self, item: dict[str, object]
+    ) -> dict[str, object]:
+        spans = item.get("evidence_highlight_spans")
+        if isinstance(spans, list) and spans:
+            first = spans[0]
+            if isinstance(first, dict):
+                span = first.get("span")
+                return span if isinstance(span, dict) else {}
+        trace_refs = item.get("trace_refs")
+        if isinstance(trace_refs, dict):
+            spans = trace_refs.get("evidence_highlight_spans")
+            if isinstance(spans, list) and spans:
+                first = spans[0]
+                if isinstance(first, dict):
+                    span = first.get("span")
+                    return span if isinstance(span, dict) else {}
+        return {}
+
+    def _chunk_refs_from_retrieval_item(
+        self, item: dict[str, object]
+    ) -> list[dict[str, object]]:
+        span = self._source_span_from_retrieval_item(item)
+        chunk_id = span.get("chunk_id") if isinstance(span, dict) else None
+        return [{"chunk_id": chunk_id}] if chunk_id else []
+
+    def _build_pool_trajectory_events(
+        self,
+        *,
+        pool: dict[str, object],
+        rounds: list[dict[str, object]],
+        candidates: list[dict[str, object]],
+        transcripts: list[dict[str, object]],
+        matches: list[dict[str, object]],
+        evolutions: list[dict[str, object]],
+        meta_reviews: list[dict[str, object]],
+        proximity_edges: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        events.append(
+            self._trajectory_event(
+                event_type="pool_created",
+                created_at=pool.get("created_at"),
+                refs={"pool_id": pool.get("pool_id")},
+                payload={"status": pool.get("status")},
+            )
+        )
+        retrieval_trace = (pool.get("preference_profile") or {}).get(
+            "active_retrieval_trace"
+        )
+        if isinstance(retrieval_trace, dict):
+            events.append(
+                self._trajectory_event(
+                    event_type="retrieval_trace",
+                    created_at=pool.get("created_at"),
+                    refs={"pool_id": pool.get("pool_id")},
+                    payload=retrieval_trace,
+                )
+            )
+        for round_item in rounds:
+            events.append(
+                self._trajectory_event(
+                    event_type="round",
+                    created_at=round_item.get("created_at"),
+                    refs={"round_id": round_item.get("round_id")},
+                    payload=round_item,
+                )
+            )
+        for transcript in transcripts:
+            events.append(
+                self._trajectory_event(
+                    event_type=f"agent:{transcript.get('agent_role')}",
+                    created_at=transcript.get("created_at"),
+                    refs={
+                        "transcript_id": transcript.get("transcript_id"),
+                        "candidate_id": transcript.get("candidate_id"),
+                        "match_id": transcript.get("match_id"),
+                    },
+                    payload=transcript,
+                )
+            )
+        for candidate in candidates:
+            for intervention in (
+                (candidate.get("reasoning_chain") or {}).get("user_interventions")
+                or []
+            ):
+                if isinstance(intervention, dict):
+                    events.append(
+                        self._trajectory_event(
+                            event_type="user_intervention",
+                            created_at=intervention.get("created_at"),
+                            refs={
+                                "candidate_id": candidate.get("candidate_id"),
+                                "event_id": intervention.get("event_id"),
+                            },
+                            payload=intervention,
+                        )
+                    )
+        for match in matches:
+            events.append(
+                self._trajectory_event(
+                    event_type="ranking_match",
+                    created_at=match.get("created_at"),
+                    refs={"match_id": match.get("match_id")},
+                    payload=match,
+                )
+            )
+        for evolution in evolutions:
+            events.append(
+                self._trajectory_event(
+                    event_type="evolution",
+                    created_at=evolution.get("created_at"),
+                    refs={"evolution_id": evolution.get("evolution_id")},
+                    payload=evolution,
+                )
+            )
+        for meta_review in meta_reviews:
+            events.append(
+                self._trajectory_event(
+                    event_type="meta_review",
+                    created_at=meta_review.get("created_at"),
+                    refs={"meta_review_id": meta_review.get("meta_review_id")},
+                    payload=meta_review,
+                )
+            )
+        for edge in proximity_edges:
+            events.append(
+                self._trajectory_event(
+                    event_type="service:proximity",
+                    created_at=edge.get("created_at"),
+                    refs={"edge_id": edge.get("edge_id")},
+                    payload=edge,
+                )
+            )
+        return sorted(events, key=lambda item: str(item.get("created_at") or ""))
+
+    def _trajectory_event(
+        self,
+        *,
+        event_type: str,
+        created_at: object,
+        refs: dict[str, object],
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "event_type": event_type,
+            "created_at": created_at,
+            "refs": refs,
+            "payload": payload,
+        }
+
+    def _build_candidate_lineage(
+        self,
+        *,
+        candidates: list[dict[str, object]],
+        transcripts: list[dict[str, object]],
+        matches: list[dict[str, object]],
+        evolutions: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        transcript_ids_by_candidate: dict[str, list[str]] = {}
+        match_ids_by_candidate: dict[str, list[str]] = {}
+        evolution_ids_by_child: dict[str, list[str]] = {}
+        for transcript in transcripts:
+            candidate_id = str(transcript.get("candidate_id") or "")
+            if candidate_id:
+                transcript_ids_by_candidate.setdefault(candidate_id, []).append(
+                    str(transcript.get("transcript_id") or "")
+                )
+        for match in matches:
+            for key in ("left_candidate_id", "right_candidate_id", "winner_candidate_id"):
+                candidate_id = str(match.get(key) or "")
+                if candidate_id:
+                    match_ids_by_candidate.setdefault(candidate_id, []).append(
+                        str(match.get("match_id") or "")
+                    )
+        for evolution in evolutions:
+            for child_id in evolution.get("child_candidate_ids") or []:
+                if child_id:
+                    evolution_ids_by_child.setdefault(str(child_id), []).append(
+                        str(evolution.get("evolution_id") or "")
+                    )
+        lineage: list[dict[str, object]] = []
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            chain = candidate.get("reasoning_chain") or {}
+            lineage.append(
+                {
+                    "candidate_id": candidate_id,
+                    "origin_type": candidate.get("origin_type"),
+                    "status": candidate.get("status"),
+                    "lineage": chain.get("lineage") or {},
+                    "generation_transcript_id": chain.get(
+                        "generation_transcript_id"
+                    ),
+                    "review_history": chain.get("review_history") or [],
+                    "transcript_ids": transcript_ids_by_candidate.get(
+                        candidate_id, []
+                    ),
+                    "match_ids": sorted(
+                        set(match_ids_by_candidate.get(candidate_id, []))
+                    ),
+                    "evolution_ids": evolution_ids_by_child.get(candidate_id, []),
+                    "user_interventions": chain.get("user_interventions") or [],
+                }
+            )
+        return lineage
+
+    async def run_pool_round(
+        self, *, pool_id: str, workspace_id: str, request_id: str, max_matches: int
     ) -> dict[str, object]:
         pool = self._multi_orchestrator.get_pool(pool_id=pool_id)
         if pool is None:
@@ -405,6 +886,13 @@ class HypothesisService:
                 request_id=request_id,
                 max_matches=max_matches,
                 start_reason="manual_api_run_round",
+            )
+        except ResearchLLMError as exc:
+            self._raise(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message=exc.message,
+                details=exc.details,
             )
         except ValueError as exc:
             self._raise(
@@ -435,11 +923,7 @@ class HypothesisService:
         return result
 
     async def finalize_pool(
-        self,
-        *,
-        pool_id: str,
-        workspace_id: str,
-        request_id: str,
+        self, *, pool_id: str, workspace_id: str, request_id: str
     ) -> list[dict[str, object]]:
         pool = self._multi_orchestrator.get_pool(pool_id=pool_id)
         if pool is None:
@@ -465,8 +949,7 @@ class HypothesisService:
             return existing
         try:
             selected_candidates = await self._multi_orchestrator.finalize_pool(
-                pool_id=pool_id,
-                request_id=request_id,
+                pool_id=pool_id, request_id=request_id
             )
         except ValueError as exc:
             self._raise(
@@ -484,16 +967,20 @@ class HypothesisService:
                 workspace_id=workspace_id,
                 statement=str(candidate.get("statement", "")).strip()
                 or str(candidate.get("summary", "")),
-                title=str(candidate.get("title", "")).strip() or "multi-agent hypothesis",
+                title=str(candidate.get("title", "")).strip()
+                or "multi-agent hypothesis",
                 summary=str(candidate.get("summary", "")).strip()
                 or str(candidate.get("statement", "")),
                 premise=str(candidate.get("testability_hint", "")).strip()
                 or str(candidate.get("summary", "")),
-                rationale=str(candidate.get("rationale", "")).strip() or "multi-agent finalized",
+                rationale=str(candidate.get("rationale", "")).strip()
+                or "multi-agent finalized",
                 testability_hint=str(candidate.get("testability_hint", "")).strip(),
                 novelty_hint=str(candidate.get("novelty_hint", "")).strip(),
                 suggested_next_steps=list(candidate.get("suggested_next_steps", [])),
-                confidence_hint=self._coerce_confidence_hint(candidate.get("confidence_hint")),
+                confidence_hint=self._coerce_confidence_hint(
+                    candidate.get("confidence_hint")
+                ),
                 trigger_refs=list(candidate.get("trigger_refs", [])),
                 related_object_ids=list(candidate.get("related_object_ids", [])),
                 novelty_typing=str(candidate.get("novelty_typing", "incremental")),
@@ -516,7 +1003,8 @@ class HypothesisService:
                 source_candidate_id=str(candidate.get("candidate_id", "")),
                 source_round_id=None,
                 finalizing_match_id=None,
-                search_tree_node_id=str(candidate.get("search_tree_node_id", "")) or None,
+                search_tree_node_id=str(candidate.get("search_tree_node_id", ""))
+                or None,
                 reasoning_chain_id=str(
                     candidate.get("reasoning_chain", {}).get("chain_id", "")
                 )
@@ -612,19 +1100,8 @@ class HypothesisService:
                     failure_mode=failure_mode,
                 )
             except ResearchLLMError as exc:
-                if (
-                    not allow_fallback
-                    or exc.error_code not in self._DETERMINISTIC_FALLBACK_ERROR_CODES
-                ):
-                    raise
-                llm_fields, llm_refs, llm_metrics = (
-                    self._build_deterministic_fallback_candidate(
-                        workspace_id=workspace_id,
-                        request_id=request_id,
-                        resolved_triggers=resolved_triggers,
-                        error=exc,
-                    )
-                )
+                exc.details.setdefault("allow_fallback_requested", allow_fallback)
+                raise
             novelty_typing = self._derive_novelty_typing(triggers=resolved_triggers)
             title = llm_fields["title"]
             statement = llm_fields["statement"]
@@ -922,86 +1399,7 @@ class HypothesisService:
                 "ontology_path_count_clipped": bool(
                     ontology_path_context.get("path_count_clipped", False)
                 ),
-                "tool_capability_chain_length": int(
-                    tool_plan.get("chain_length") or 0
-                ),
-            },
-        )
-
-    def _build_deterministic_fallback_candidate(
-        self,
-        *,
-        workspace_id: str,
-        request_id: str,
-        resolved_triggers: list[dict[str, object]],
-        error: ResearchLLMError,
-    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-        primary = resolved_triggers[0]
-        trigger_ids = [str(item["trigger_id"]) for item in resolved_triggers]
-        trigger_types = [str(item["trigger_type"]) for item in resolved_triggers]
-        trigger_id_text = ", ".join(trigger_ids)
-        trigger_type_text = ", ".join(trigger_types)
-        primary_target = f"{primary['object_ref_type']}:{primary['object_ref_id']}"
-        summaries = [
-            str(item.get("summary", "")).strip()
-            for item in resolved_triggers[:3]
-            if str(item.get("summary", "")).strip()
-        ]
-        evidence_text = "; ".join(summaries) if summaries else trigger_id_text
-        graph_workspace = self._store.get_graph_workspace(workspace_id)
-        graph_nodes = self._store.list_graph_nodes(workspace_id)
-        graph_edges = self._store.list_graph_edges(workspace_id)
-        recent_failures = self._store.list_failures(workspace_id=workspace_id)[-3:]
-        existing = self._store.list_hypotheses(workspace_id=workspace_id)[:5]
-        backend, model = resolve_research_backend_and_model()
-        return (
-            {
-                "title": f"Fallback candidate from {primary['trigger_type']}: {primary['object_ref_id']}",
-                "statement": (
-                    f"If the selected trigger set ({trigger_id_text}) is causal for "
-                    f"{primary_target}, then a focused validation should change the "
-                    "affected research route or evidence state."
-                ),
-                "rationale": (
-                    f"Deterministic fallback used after {error.error_code}; it binds the "
-                    f"candidate to trigger types {trigger_type_text} and evidence: {evidence_text}."
-                ),
-                "testability_hint": (
-                    f"Validate the primary trigger {primary['trigger_id']} against "
-                    f"{primary_target} before promoting this candidate."
-                ),
-                "novelty_hint": (
-                    f"Fallback synthesis only; novelty depends on the selected trigger "
-                    f"combination: {trigger_type_text}."
-                ),
-                "confidence_hint": 0.35,
-                "suggested_next_steps": [
-                    f"inspect trigger {trigger_id_text}",
-                    f"run validation against {primary_target}",
-                ],
-            },
-            {
-                "provider_backend": backend,
-                "provider_model": model,
-                "request_id": request_id,
-                "llm_response_id": "",
-            },
-            {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "fallback_used": True,
-                "degraded": True,
-                "degraded_reason": error.error_code,
-                "graph_latest_version_id": (
-                    graph_workspace.get("latest_version_id")
-                    if graph_workspace
-                    else None
-                ),
-                "graph_node_count": len(graph_nodes),
-                "graph_edge_count": len(graph_edges),
-                "recent_failure_count": len(recent_failures),
-                "existing_hypothesis_count": len(existing),
+                "tool_capability_chain_length": int(tool_plan.get("chain_length") or 0),
             },
         )
 
@@ -1399,7 +1797,9 @@ class HypothesisService:
                         {"object_type": "source", "object_id": source_id},
                         *[
                             {
-                                "object_type": str(item.get("candidate_type", "candidate")),
+                                "object_type": str(
+                                    item.get("candidate_type", "candidate")
+                                ),
                                 "object_id": str(item.get("candidate_id", "")),
                             }
                             for item in sample
