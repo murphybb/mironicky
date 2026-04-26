@@ -78,6 +78,53 @@ def _trigger_refs() -> list[dict[str, object]]:
     ]
 
 
+def _seed_confirmed_candidate(
+    store: ResearchApiStateStore,
+    *,
+    workspace_id: str,
+    source_id: str,
+    text: str,
+    candidate_id_suffix: str,
+) -> str:
+    source = store.get_source(source_id)
+    if source is None:
+        store.create_source(
+            workspace_id=workspace_id,
+            source_type="paper",
+            title=f"Seed source {source_id}",
+            content=text,
+            metadata={},
+            import_request_id=f"req_seed_source_{candidate_id_suffix}",
+            source_id=source_id,
+        )
+    batch = store.create_candidate_batch(
+        workspace_id=workspace_id,
+        source_id=source_id,
+        job_id=f"job_seed_{candidate_id_suffix}",
+        request_id=f"req_seed_{candidate_id_suffix}",
+    )
+    candidate = store.add_candidates_to_batch(
+        candidate_batch_id=str(batch["candidate_batch_id"]),
+        workspace_id=workspace_id,
+        source_id=source_id,
+        job_id=f"job_seed_{candidate_id_suffix}",
+        candidates=[
+            {
+                "candidate_type": "evidence",
+                "text": text,
+                "source_span": {"start": 0, "end": max(len(text), 1)},
+                "trace_refs": {"source_anchor_id": f"anchor_{candidate_id_suffix}"},
+                "extractor_name": "seed",
+            }
+        ],
+    )[0]
+    store.update_candidate_status(
+        candidate_id=str(candidate["candidate_id"]),
+        status="confirmed",
+    )
+    return str(candidate["candidate_id"])
+
+
 class RecordingGateway:
     def __init__(
         self, *, fail_agent: str | None = None, invalid_agent: str | None = None
@@ -2711,6 +2758,13 @@ async def test_literature_frontier_active_retrieval_calls_service_and_persists_t
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _build_store(tmp_path)
+    uploaded_candidate_id = _seed_confirmed_candidate(
+        store,
+        workspace_id="ws_real_agents",
+        source_id="source_1",
+        text="Uploaded source evidence for literature frontier.",
+        candidate_id_suffix="frontier_1",
+    )
     gateway = RecordingGateway()
     service = HypothesisService(store)
     service._multi_orchestrator = HypothesisMultiAgentOrchestrator(
@@ -2778,26 +2832,131 @@ async def test_literature_frontier_active_retrieval_calls_service_and_persists_t
     assert trace["status"] == "completed"
     assert trace["service"] == "ResearchRetrievalService"
     assert trace["items"][0]["result_id"] == "evidence:claim_1"
-    assert trace["evidence_packets"][0]["retrieval_origin"] == "supplemental"
-    assert trace["evidence_packets"][0]["rerank_score"] == 0.91
-    assert trace["evidence_packets"][0]["citation_verification_status"] == "verified"
+    assert trace["evidence_packets"][0]["retrieval_origin"] == "uploaded"
+    assert trace["evidence_packets"][0]["packet_id"] == f"uploaded_candidate:{uploaded_candidate_id}"
+    assert trace["evidence_packets"][1]["retrieval_origin"] == "supplemental"
+    assert trace["evidence_packets"][1]["rerank_score"] == 0.91
+    assert trace["evidence_packets"][1]["citation_verification_status"] == "verified"
+    assert len(trace["evidence_packets"]) <= 20
     generation_transcripts = [
         transcript
         for transcript in store.list_hypothesis_agent_transcripts(pool_id=str(pool["pool_id"]))
         if transcript["agent_role"] == "generation"
     ]
     assert generation_transcripts
-    assert (
-        generation_transcripts[0]["input_payload"]["evidence_packets"][0]["packet_id"]
-        == "evidence_packet:evidence:claim_1"
+    assert generation_transcripts[0]["input_payload"]["evidence_packets"][0]["packet_id"].startswith(
+        "uploaded_candidate:"
     )
-    assert "evidence_packet:evidence:claim_1" in generation_transcripts[0]["input_payload"]["rendered_prompt"]
+    assert (
+        f"uploaded_candidate:{uploaded_candidate_id}"
+        in generation_transcripts[0]["input_payload"]["rendered_prompt"]
+    )
     supervisor_transcript = next(
         transcript
         for transcript in store.list_hypothesis_agent_transcripts(pool_id=str(pool["pool_id"]))
         if transcript["agent_role"] == "supervisor"
     )
-    assert "evidence_packet:evidence:claim_1" in supervisor_transcript["input_payload"]["rendered_prompt"]
+    assert (
+        f"uploaded_candidate:{uploaded_candidate_id}"
+        in supervisor_transcript["input_payload"]["rendered_prompt"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_literature_frontier_uses_uploaded_evidence_when_active_retrieval_disabled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _build_store(tmp_path)
+    uploaded_candidate_id = _seed_confirmed_candidate(
+        store,
+        workspace_id="ws_real_agents",
+        source_id="source_1",
+        text="Confirmed uploaded literature evidence for disabled retrieval mode.",
+        candidate_id_suffix="frontier_disabled",
+    )
+    service = HypothesisService(store)
+    service._multi_orchestrator = HypothesisMultiAgentOrchestrator(
+        store, llm_gateway=RecordingGateway()
+    )
+
+    class _RetrievalShouldNotRun:
+        def __init__(self, store: ResearchApiStateStore) -> None:
+            self._store = store
+
+        def retrieve(self, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("active retrieval should be disabled for this test")
+
+    monkeypatch.setattr(
+        "research_layer.services.hypothesis_service.ResearchRetrievalService",
+        _RetrievalShouldNotRun,
+    )
+
+    pool = await service.generate_literature_frontier_pool(
+        workspace_id="ws_real_agents",
+        source_ids=["source_1", "source_1"],
+        request_id="req_frontier_retrieval_disabled",
+        generation_job_id=None,
+        research_goal="Use uploaded evidence packets without active retrieval.",
+        frontier_size=3,
+        max_rounds=1,
+        constraints={},
+        preference_profile={},
+        active_retrieval={"enabled": False, "max_papers_per_burst": 3, "max_bursts": 2},
+    )
+
+    trace = pool["preference_profile"]["active_retrieval_trace"]
+    assert trace["status"] == "completed"
+    assert trace["service"] == "UploadedConfirmedCandidates"
+    assert trace["evidence_packets"]
+    assert trace["evidence_packets"][0]["retrieval_origin"] == "uploaded"
+    assert trace["evidence_packets"][0]["packet_id"] == f"uploaded_candidate:{uploaded_candidate_id}"
+    assert len({item["packet_id"] for item in trace["evidence_packets"]}) == len(
+        trace["evidence_packets"]
+    )
+
+    supervisor_transcript = next(
+        transcript
+        for transcript in store.list_hypothesis_agent_transcripts(pool_id=str(pool["pool_id"]))
+        if transcript["agent_role"] == "supervisor"
+    )
+    assert supervisor_transcript["input_payload"]["evidence_packets"]
+    assert supervisor_transcript["input_payload"]["evidence_packets"][0]["retrieval_origin"] == "uploaded"
+
+
+@pytest.mark.asyncio
+async def test_literature_frontier_uploaded_evidence_packets_are_capped_to_20(
+    tmp_path,
+) -> None:
+    store = _build_store(tmp_path)
+    for index in range(25):
+        _seed_confirmed_candidate(
+            store,
+            workspace_id="ws_real_agents",
+            source_id="source_cap",
+            text=f"Confirmed uploaded evidence #{index}",
+            candidate_id_suffix=f"frontier_cap_{index}",
+        )
+
+    service = HypothesisService(store)
+    service._multi_orchestrator = HypothesisMultiAgentOrchestrator(
+        store, llm_gateway=RecordingGateway()
+    )
+
+    pool = await service.generate_literature_frontier_pool(
+        workspace_id="ws_real_agents",
+        source_ids=["source_cap"],
+        request_id="req_frontier_cap",
+        generation_job_id=None,
+        research_goal="Cap uploaded evidence packet volume.",
+        frontier_size=3,
+        max_rounds=1,
+        constraints={},
+        preference_profile={},
+        active_retrieval={"enabled": False, "max_papers_per_burst": 3, "max_bursts": 2},
+    )
+
+    trace = pool["preference_profile"]["active_retrieval_trace"]
+    assert len(trace["evidence_packets"]) <= 20
 
 
 @pytest.mark.asyncio

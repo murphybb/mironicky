@@ -76,7 +76,7 @@ class MemoryRequestLogService:
             return []
 
         # Get current request context information
-        app_info = get_current_app_info()
+        app_info = get_current_app_info() or {}
         request_id = app_info.get("request_id", "unknown")
 
         saved_message_ids = []

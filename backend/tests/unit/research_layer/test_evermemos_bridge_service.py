@@ -238,6 +238,47 @@ def test_recall_maps_logical_to_hybrid_and_links_claim_ids(
     ]
 
 
+def test_recall_async_uses_inline_runner_instead_of_blocking_runner(
+    monkeypatch, tmp_path
+) -> None:
+    store = _build_store(tmp_path)
+    recall_service = ResearchMemoryRecallService(store)
+    request_log: list[str] = []
+
+    class _FakeMemoryManager:
+        async def retrieve_mem(self, request):  # type: ignore[no-untyped-def]
+            request_log.append(str(request.group_id or ""))
+            return RetrieveMemResponse()
+
+    monkeypatch.setattr(recall_service, "_get_memory_manager", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(
+        recall_service,
+        "_run_awaitable_blocking",
+        lambda _factory: (_ for _ in ()).throw(AssertionError("blocking runner used")),
+    )
+
+    response = asyncio.run(
+        recall_service.recall_async(
+            workspace_id="ws_bridge_01",
+            query_text="retrieve the bridge claim",
+            requested_method="logical",
+            scope_claim_ids=["claim_bridge_01"],
+            scope_mode="require",
+            top_k=5,
+            request_id="req_recall_async_bridge_01",
+            trace_refs={"context_type": "retrieval_view", "view_type": "evidence"},
+        )
+    )
+
+    assert response["status"] == "empty"
+    assert response["trace_refs"]["group_ids"] == [
+        "research_claims::ws_bridge_01",
+        "research_sources::ws_bridge_01",
+    ]
+    assert "research_claims::ws_bridge_01" in request_log
+    assert "research_sources::ws_bridge_01" in request_log
+
+
 def test_recall_skips_when_query_and_claim_scope_are_both_missing(tmp_path) -> None:
     store = _build_store(tmp_path)
     recall_service = ResearchMemoryRecallService(store)

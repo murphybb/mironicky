@@ -135,7 +135,9 @@ def test_local_claim_memory_id_resolves_through_retrieval_service(
     assert resolved["source_ref"]["source_id"] == claim["source_id"]
 
 
-def test_source_import_writes_source_memory_before_recall(monkeypatch, tmp_path) -> None:
+def test_source_import_service_writes_source_memory_sync_before_controller_recall(
+    monkeypatch, tmp_path
+) -> None:
     store = _store(tmp_path)
     service = SourceImportService(store)
     calls: list[tuple[str, dict[str, object]]] = []
@@ -147,16 +149,7 @@ def test_source_import_writes_source_memory_before_recall(monkeypatch, tmp_path)
             "memory_id": f"local_memory_manager:source:{kwargs['source']['source_id']}",
         }
 
-    def _fake_recall(**kwargs):  # type: ignore[no-untyped-def]
-        calls.append(("recall", kwargs))
-        return {"status": "skipped", "items": [], "total": 0}
-
     monkeypatch.setattr(service._memory_bridge, "sync_source", _fake_sync_source)
-    monkeypatch.setattr(
-        service._source_memory_recall_service,
-        "recall_for_source",
-        _fake_recall,
-    )
 
     source = service.import_source(
         workspace_id="ws_p2_source",
@@ -167,11 +160,10 @@ def test_source_import_writes_source_memory_before_recall(monkeypatch, tmp_path)
         request_id="req_p2_source",
     )
 
-    assert [name for name, _ in calls] == ["sync", "recall"]
+    assert [name for name, _ in calls] == ["sync"]
     assert calls[0][1]["source"]["source_id"] == source["source_id"]
     assert calls[0][1]["source_hash"]["source_id"] == source["source_id"]
     assert calls[0][1]["artifact_count"] >= 1
-    assert calls[1][1]["source_id"] == source["source_id"]
 
 
 def test_local_source_sync_persists_addressable_memory_link(monkeypatch, tmp_path) -> None:
@@ -312,11 +304,6 @@ def test_source_import_still_emits_source_bridge_events_when_artifact_count_fail
     responses = iter([object(), ["log_source"], 1])
 
     monkeypatch.delenv("RESEARCH_EVERMEMOS_BRIDGE_URL", raising=False)
-    monkeypatch.setattr(
-        service._source_memory_recall_service,
-        "recall_for_source",
-        lambda **_kwargs: {"status": "skipped", "items": [], "total": 0},
-    )
     monkeypatch.setattr(
         store,
         "list_source_artifacts",

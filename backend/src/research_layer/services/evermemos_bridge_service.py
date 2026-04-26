@@ -55,6 +55,9 @@ class _AsyncMemoryRuntimeMixin:
     def _get_memory_manager(self) -> MemoryManager:
         return MemoryManager()
 
+    async def _run_awaitable_inline(self, factory: Callable[[], Awaitable[_T]]) -> _T:
+        return await factory()
+
     def _run_awaitable_blocking(
         self, factory: Callable[[], Awaitable[_T]]
     ) -> _T:
@@ -746,6 +749,54 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
             scope_mode=scope_mode,
         )
 
+    async def recall_async(
+        self,
+        *,
+        workspace_id: str,
+        query_text: str,
+        requested_method: str,
+        scope_claim_ids: list[str] | None = None,
+        scope_mode: str = "prefer",
+        top_k: int = 8,
+        request_id: str | None = None,
+        trace_refs: dict[str, object] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, object]:
+        normalized_claim_ids = self._normalize_claim_ids(scope_claim_ids or [])
+        normalized_query = " ".join(str(query_text or "").split())
+        context_refs = dict(trace_refs or {})
+        if reason and "reason" not in context_refs:
+            context_refs["reason"] = reason
+        if scope_mode == "require" and not normalized_claim_ids:
+            return self.failed(
+                workspace_id=workspace_id,
+                requested_method=requested_method,
+                reason="required_claim_scope_missing",
+                query_text=normalized_query,
+                request_id=request_id,
+                trace_refs=context_refs,
+            )
+        if not normalized_query:
+            return self.skipped(
+                workspace_id=workspace_id,
+                requested_method=requested_method,
+                reason="missing_query_text",
+                query_text="",
+                request_id=request_id,
+                trace_refs=context_refs,
+            )
+        return await self.recall_for_claims_async(
+            workspace_id=workspace_id,
+            claim_ids=normalized_claim_ids,
+            query_text=normalized_query,
+            requested_method=requested_method,
+            top_k=top_k,
+            request_id=request_id or f"recall::{workspace_id}::{scope_mode}",
+            context_type=str(context_refs.get("context_type") or "main_path"),
+            context_ref=context_refs,
+            scope_mode=scope_mode,
+        )
+
     def skipped(
         self,
         *,
@@ -887,6 +938,169 @@ class ResearchMemoryRecallService(_AsyncMemoryRuntimeMixin):
                 type_count = 0
                 for group_id in group_ids:
                     response = self._run_awaitable_blocking(
+                        lambda memory_type=memory_type, group_id=group_id: self._get_memory_manager().retrieve_mem(
+                            RetrieveMemRequest(
+                                group_id=group_id,
+                                memory_types=[memory_type],
+                                top_k=safe_top_k,
+                                include_metadata=True,
+                                query=query,
+                                retrieve_method=applied_method,
+                            )
+                        )
+                    )
+                    items = self._flatten_retrieve_response(
+                        response=response,
+                        fallback_memory_type=memory_type.value,
+                    )
+                    type_count += len(items)
+                    flattened.extend(items)
+                per_type_count[memory_type.value] = type_count
+            scoped = self._scope_items(
+                flattened,
+                normalized_claim_ids,
+                scope_mode=scope_mode,
+            )
+            deduped = self._dedupe_items(scoped)
+            limited = deduped[:safe_top_k]
+            status = "completed" if limited else "empty"
+            response = self._build_response(
+                status=status,
+                requested_method=requested,
+                applied_method=applied_method.value,
+                reason=reason,
+                query_text=query,
+                items=limited,
+                workspace_id=workspace_id,
+                claim_ids=normalized_claim_ids,
+                context_type=context_type,
+                context_ref=context_ref,
+                per_type_count=per_type_count,
+            )
+            self._emit_recall_completed_event(
+                request_id=request_id,
+                workspace_id=workspace_id,
+                status=status,
+                requested_method=requested,
+                applied_method=applied_method.value,
+                claim_ids=normalized_claim_ids,
+                reason=response["reason"],
+                context_type=context_type,
+                context_ref=context_ref,
+                query_text=query,
+                returned_count=response["total"],
+                candidate_count=len(flattened),
+                error=None,
+            )
+            return response
+        except Exception as exc:
+            normalized_reason = self._normalize_reason(str(exc))
+            self._emit_recall_completed_event(
+                request_id=request_id,
+                workspace_id=workspace_id,
+                status="failed",
+                requested_method=requested,
+                applied_method=applied_method.value,
+                claim_ids=normalized_claim_ids,
+                reason=normalized_reason,
+                context_type=context_type,
+                context_ref=context_ref,
+                query_text=query,
+                returned_count=0,
+                candidate_count=0,
+                error={"message": str(exc)},
+            )
+            return self._build_response(
+                status="failed",
+                requested_method=requested,
+                applied_method=applied_method.value,
+                reason=normalized_reason,
+                query_text=query,
+                items=[],
+                workspace_id=workspace_id,
+                claim_ids=normalized_claim_ids,
+                context_type=context_type,
+                context_ref=context_ref,
+                per_type_count={},
+            )
+
+    async def recall_for_claims_async(
+        self,
+        *,
+        workspace_id: str,
+        claim_ids: list[str],
+        query_text: str,
+        requested_method: str,
+        top_k: int,
+        request_id: str,
+        context_type: str,
+        context_ref: dict[str, object] | None = None,
+        scope_mode: str = "require",
+    ) -> dict[str, object]:
+        normalized_claim_ids = self._normalize_claim_ids(claim_ids)
+        requested = str(requested_method or "hybrid").strip().lower() or "hybrid"
+        applied_method, reason = self._resolve_method(requested)
+        query = self._resolve_query_text(
+            workspace_id=workspace_id,
+            query_text=query_text,
+            claim_ids=normalized_claim_ids,
+        )
+        safe_top_k = min(max(int(top_k or 1), 1), 25)
+        if not query:
+            return self.build_skipped_response(
+                requested_method=requested,
+                applied_method=applied_method.value,
+                reason="missing_query_and_claim_scope",
+                query_text="",
+                workspace_id=workspace_id,
+                claim_ids=normalized_claim_ids,
+                context_type=context_type,
+                request_id=request_id,
+                context_ref=context_ref,
+            )
+        skip_reason = self._recall_skip_reason()
+        if skip_reason is not None:
+            return self.build_skipped_response(
+                requested_method=requested,
+                applied_method=applied_method.value,
+                reason=skip_reason if reason is None else f"{skip_reason}; {reason}",
+                query_text=query,
+                workspace_id=workspace_id,
+                claim_ids=normalized_claim_ids,
+                context_type=context_type,
+                request_id=request_id,
+                context_ref=context_ref,
+            )
+
+        group_ids = [
+            _build_research_claim_group_id(workspace_id),
+            _build_research_source_group_id(workspace_id),
+        ]
+        self._store.emit_event(
+            event_name="evermemos_recall_started",
+            request_id=request_id,
+            job_id=None,
+            workspace_id=workspace_id,
+            component="evermemos_bridge_service",
+            step="memory_recall",
+            status="started",
+            refs={
+                "context_type": context_type,
+                "context_ref": context_ref or {},
+                "requested_method": requested,
+                "applied_method": applied_method.value,
+                "claim_ids": normalized_claim_ids,
+                "group_ids": group_ids,
+            },
+            metrics={"query_length": len(query), "top_k": safe_top_k},
+        )
+        try:
+            flattened: list[dict[str, object]] = []
+            per_type_count: dict[str, int] = {}
+            for memory_type in _RECALL_MEMORY_TYPES:
+                type_count = 0
+                for group_id in group_ids:
+                    response = await self._run_awaitable_inline(
                         lambda memory_type=memory_type, group_id=group_id: self._get_memory_manager().retrieve_mem(
                             RetrieveMemRequest(
                                 group_id=group_id,

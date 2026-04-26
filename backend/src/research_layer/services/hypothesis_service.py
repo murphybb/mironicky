@@ -442,6 +442,19 @@ class HypothesisService:
             active_retrieval=active_retrieval,
             failure_details={"source_ids": canonical_source_ids},
         )
+        uploaded_evidence_packets = self._build_literature_candidate_evidence_packets(
+            workspace_id=workspace_id,
+            source_ids=canonical_source_ids,
+            research_goal=research_goal,
+            limit_per_source=5,
+            total_limit=20,
+        )
+        active_retrieval_trace = self._merge_literature_evidence_packets(
+            active_retrieval_trace=active_retrieval_trace,
+            uploaded_evidence_packets=uploaded_evidence_packets,
+            research_goal=research_goal,
+            total_limit=20,
+        )
         try:
             pool = await self._multi_orchestrator.create_pool(
                 workspace_id=workspace_id,
@@ -587,6 +600,139 @@ class HypothesisService:
             if isinstance(trace_refs, dict) and trace_refs.get("source_id"):
                 source_ids.append(str(trace_refs["source_id"]))
         return source_ids
+
+    def _build_literature_candidate_evidence_packets(
+        self,
+        *,
+        workspace_id: str,
+        source_ids: list[str],
+        research_goal: str,
+        limit_per_source: int = 5,
+        total_limit: int = 20,
+    ) -> list[dict[str, object]]:
+        packets: list[dict[str, object]] = []
+        safe_per_source = max(int(limit_per_source), 1)
+        safe_total = max(int(total_limit), 1)
+        for source_id in source_ids:
+            if len(packets) >= safe_total:
+                break
+            source = self._store.get_source(source_id)
+            if source is None or str(source.get("workspace_id")) != workspace_id:
+                continue
+            confirmed = self._store.list_candidates(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                candidate_type=None,
+                status="confirmed",
+            )
+            for candidate in confirmed[:safe_per_source]:
+                if len(packets) >= safe_total:
+                    break
+                candidate_id = str(candidate.get("candidate_id") or "").strip()
+                if not candidate_id:
+                    continue
+                trace_refs = (
+                    dict(candidate.get("trace_refs") or {})
+                    if isinstance(candidate.get("trace_refs"), dict)
+                    else {}
+                )
+                source_anchor_id = str(trace_refs.get("source_anchor_id") or "").strip()
+                packet = {
+                    "packet_id": f"uploaded_candidate:{candidate_id}",
+                    "result_id": f"uploaded_candidate:{candidate_id}",
+                    "retrieval_origin": "uploaded",
+                    "query_intent": research_goal,
+                    "trigger_source": "literature_frontier_uploaded_candidates",
+                    "retrieved_paper_metadata": {
+                        "title": source.get("title"),
+                        "source_ref": {
+                            "source_id": source_id,
+                            "title": source.get("title"),
+                        },
+                        "supporting_refs": {
+                            "candidate_id": candidate_id,
+                            "candidate_type": candidate.get("candidate_type"),
+                        },
+                    },
+                    "source_id": source_id,
+                    "source_span": candidate.get("source_span") or {},
+                    "chunk_refs": (
+                        [{"source_anchor_id": source_anchor_id}]
+                        if source_anchor_id
+                        else []
+                    ),
+                    "rerank_score": None,
+                    "citation_verification_status": "uploaded_verified",
+                    "failure_state": None,
+                    "snippet": candidate.get("text"),
+                    "evidence_refs": [candidate_id],
+                    "trace_refs": {
+                        "source_id": source_id,
+                        "candidate_id": candidate_id,
+                        **(
+                            {"source_anchor_id": source_anchor_id}
+                            if source_anchor_id
+                            else {}
+                        ),
+                    },
+                }
+                packets.append(packet)
+        return packets
+
+    def _merge_literature_evidence_packets(
+        self,
+        *,
+        active_retrieval_trace: dict[str, object] | None,
+        uploaded_evidence_packets: list[dict[str, object]],
+        research_goal: str,
+        total_limit: int = 20,
+    ) -> dict[str, object] | None:
+        safe_total = max(int(total_limit), 1)
+        if not uploaded_evidence_packets and active_retrieval_trace is None:
+            return None
+        if active_retrieval_trace is None:
+            return {
+                "status": "completed",
+                "service": "UploadedConfirmedCandidates",
+                "query_intent": research_goal,
+                "trigger_source": "literature_frontier_uploaded_candidates",
+                "view_type": "evidence",
+                "retrieve_method": "uploaded_candidates",
+                "total": len(uploaded_evidence_packets),
+                "query_ref": {"source": "confirmed_candidates"},
+                "items": [],
+                "evidence_packets": self._dedupe_evidence_packets(
+                    uploaded_evidence_packets, total_limit=safe_total
+                ),
+            }
+        trace = dict(active_retrieval_trace)
+        existing_packets = trace.get("evidence_packets")
+        normalized_existing = (
+            [item for item in existing_packets if isinstance(item, dict)]
+            if isinstance(existing_packets, list)
+            else []
+        )
+        trace["evidence_packets"] = self._dedupe_evidence_packets(
+            [*uploaded_evidence_packets, *normalized_existing],
+            total_limit=safe_total,
+        )
+        return trace
+
+    @staticmethod
+    def _dedupe_evidence_packets(
+        packets: list[dict[str, object]], *, total_limit: int
+    ) -> list[dict[str, object]]:
+        merged: list[dict[str, object]] = []
+        seen_packet_ids: set[str] = set()
+        for packet in packets:
+            packet_id = str(packet.get("packet_id") or "").strip()
+            if not packet_id or packet_id in seen_packet_ids:
+                continue
+            seen_packet_ids.add(packet_id)
+            merged.append(packet)
+            if len(merged) >= total_limit:
+                break
+        return merged
 
     def _build_retrieval_evidence_packets(
         self,

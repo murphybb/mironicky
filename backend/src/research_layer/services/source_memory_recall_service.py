@@ -38,23 +38,100 @@ class SourceMemoryRecallService:
                 },
             )
         except Exception as exc:
-            error = {
-                "type": type(exc).__name__,
-                "message": str(exc),
-                "reason": self._normalize_reason(str(exc)),
-            }
-            response = {
-                "status": "failed",
-                "reason": error["reason"],
-                "requested_method": requested_method,
-                "applied_method": None,
-                "query_text": self._normalize_query_text(query_text),
-                "total": 0,
-                "items": [],
-                "trace_refs": source_trace_refs,
-                "error": error,
-            }
+            response = self._build_failed_response(
+                query_text=query_text,
+                requested_method=requested_method,
+                source_trace_refs=source_trace_refs,
+                exc=exc,
+            )
+        return self._persist_recall_result(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            query_text=query_text,
+            requested_method=requested_method,
+            request_id=request_id,
+            response=response,
+        )
 
+    async def recall_for_source_async(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        query_text: str,
+        request_id: str,
+        requested_method: str = "logical",
+        trace_refs: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        source_trace_refs = {
+            "source_id": source_id,
+            "request_id": request_id,
+            **(trace_refs or {}),
+        }
+        try:
+            response = await self._memory_recall_service.recall_async(
+                workspace_id=workspace_id,
+                query_text=query_text,
+                requested_method=requested_method,
+                scope_claim_ids=[],
+                scope_mode="prefer",
+                request_id=request_id,
+                trace_refs={
+                    "context_type": "source_import",
+                    **source_trace_refs,
+                },
+            )
+        except Exception as exc:
+            response = self._build_failed_response(
+                query_text=query_text,
+                requested_method=requested_method,
+                source_trace_refs=source_trace_refs,
+                exc=exc,
+            )
+        return self._persist_recall_result(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            query_text=query_text,
+            requested_method=requested_method,
+            request_id=request_id,
+            response=response,
+        )
+
+    def _build_failed_response(
+        self,
+        *,
+        query_text: str,
+        requested_method: str,
+        source_trace_refs: dict[str, object],
+        exc: Exception,
+    ) -> dict[str, object]:
+        error = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "reason": self._normalize_reason(str(exc)),
+        }
+        return {
+            "status": "failed",
+            "reason": error["reason"],
+            "requested_method": requested_method,
+            "applied_method": None,
+            "query_text": self._normalize_query_text(query_text),
+            "total": 0,
+            "items": [],
+            "trace_refs": source_trace_refs,
+            "error": error,
+        }
+
+    def _persist_recall_result(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        query_text: str,
+        requested_method: str,
+        request_id: str,
+        response: dict[str, object],
+    ) -> dict[str, object]:
         items = response.get("items")
         normalized_items = items if isinstance(items, list) else []
         trace = response.get("trace_refs")

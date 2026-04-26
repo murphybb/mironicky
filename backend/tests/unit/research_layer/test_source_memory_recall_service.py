@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import asyncio
+
 from research_layer.api.controllers._state_store import ResearchApiStateStore
 from research_layer.services.source_memory_recall_service import SourceMemoryRecallService
 
@@ -192,3 +194,99 @@ def test_source_memory_recall_persists_failed_result_when_recall_raises(tmp_path
         reloaded_source["memory_recall"]["error"]["message"]
         == "evermemos unavailable"
     )
+
+
+def test_source_memory_recall_async_persists_completed_result(monkeypatch, tmp_path) -> None:
+    store = _build_store(tmp_path)
+    source = _seed_source(store)
+    service = SourceMemoryRecallService(store)
+
+    async def _fake_recall_async(**_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "completed",
+            "reason": "logical_not_supported_by_evermemos",
+            "requested_method": "logical",
+            "applied_method": "hybrid",
+            "query_text": "brand attitude claim",
+            "total": 1,
+            "items": [{"memory_id": "mem_async_1"}],
+            "trace_refs": {"group_id": "research_claims::ws_source_recall"},
+        }
+
+    monkeypatch.setattr(service._memory_recall_service, "recall_async", _fake_recall_async)
+
+    result = asyncio.run(
+        service.recall_for_source_async(
+            workspace_id="ws_source_recall",
+            source_id=str(source["source_id"]),
+            query_text="brand attitude claim",
+            request_id="req_source_recall_async",
+        )
+    )
+
+    assert result["status"] == "completed"
+    loaded = store.get_source_memory_recall_result(str(result["recall_id"]))
+    assert loaded is not None
+    assert loaded["status"] == "completed"
+    assert loaded["items"][0]["memory_id"] == "mem_async_1"
+
+
+def test_source_memory_recall_async_persists_skipped_result(monkeypatch, tmp_path) -> None:
+    store = _build_store(tmp_path)
+    source = _seed_source(store)
+    service = SourceMemoryRecallService(store)
+
+    async def _fake_recall_async(**_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "status": "skipped",
+            "reason": "missing_query_text",
+            "requested_method": "logical",
+            "applied_method": "hybrid",
+            "query_text": "",
+            "total": 0,
+            "items": [],
+            "trace_refs": {"explicit": True},
+        }
+
+    monkeypatch.setattr(service._memory_recall_service, "recall_async", _fake_recall_async)
+
+    result = asyncio.run(
+        service.recall_for_source_async(
+            workspace_id="ws_source_recall",
+            source_id=str(source["source_id"]),
+            query_text="",
+            request_id="req_source_recall_async_skipped",
+        )
+    )
+
+    assert result["status"] == "skipped"
+    loaded = store.get_source_memory_recall_result(str(result["recall_id"]))
+    assert loaded is not None
+    assert loaded["reason"] == "missing_query_text"
+
+
+def test_source_memory_recall_async_persists_failed_result_when_recall_raises(
+    tmp_path,
+) -> None:
+    store = _build_store(tmp_path)
+    source = _seed_source(store)
+    service = SourceMemoryRecallService(store)
+
+    async def _raise_recall_async(**_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("evermemos async unavailable")
+
+    service._memory_recall_service.recall_async = _raise_recall_async  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        service.recall_for_source_async(
+            workspace_id="ws_source_recall",
+            source_id=str(source["source_id"]),
+            query_text="brand attitude claim",
+            request_id="req_source_recall_async_failed",
+        )
+    )
+
+    assert result["status"] == "failed"
+    loaded = store.get_source_memory_recall_result(str(result["recall_id"]))
+    assert loaded is not None
+    assert loaded["error"]["message"] == "evermemos async unavailable"

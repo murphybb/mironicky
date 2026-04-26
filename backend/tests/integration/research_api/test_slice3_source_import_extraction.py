@@ -137,6 +137,55 @@ def test_workspaces_endpoint_lists_existing_non_empty_workspaces() -> None:
     assert workspace["updated_at"]
 
 
+def test_import_source_response_reload_includes_latest_memory_recall(monkeypatch) -> None:
+    client = _build_test_client()
+
+    async def _fake_recall_for_source_async(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        query_text: str,
+        request_id: str,
+        requested_method: str = "logical",
+        trace_refs: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return STORE.create_source_memory_recall_result(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            status="completed",
+            reason=None,
+            requested_method=requested_method,
+            applied_method="hybrid",
+            query_text=query_text,
+            total=1,
+            items=[{"memory_id": "mem_import_async_1"}],
+            trace_refs=trace_refs or {},
+            error=None,
+            request_id=request_id,
+        )
+
+    monkeypatch.setattr(
+        "research_layer.services.source_memory_recall_service.SourceMemoryRecallService.recall_for_source_async",
+        _fake_recall_for_source_async,
+    )
+
+    response = client.post(
+        "/api/v1/research/sources/import",
+        json={
+            "workspace_id": "ws_import_memory_reload",
+            "source_type": "paper",
+            "title": "memory recall reload",
+            "content": "The source import should return latest memory recall payload.",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["memory_recall"]["status"] == "completed"
+    assert payload["memory_recall"]["total"] == 1
+    assert payload["memory_recall"]["items"][0]["memory_id"] == "mem_import_async_1"
+
+
 def test_url_source_import_remote_fetch_failure_is_explicit(monkeypatch) -> None:
     def _raise_remote_fetch(_self, _url: str) -> str:
         raise SourceImportError(
@@ -462,6 +511,108 @@ def test_sources_list_returns_real_workspace_scoped_materials() -> None:
 
 
 class _PromptBArgumentGraphGateway:
+    async def invoke_text(self, **kwargs: object) -> LLMCallResult:
+        prompt_name = str(kwargs.get("prompt_name") or "")
+        if prompt_name.startswith("argument_unit_extraction"):
+            raw_text = json.dumps(
+                {
+                    "units": [
+                        {
+                            "unit_id": "u_claim",
+                            "semantic_type": "claim",
+                            "text": "The report concludes that reputation repair needs sustained governance reform.",
+                            "quote": "The report concludes that reputation repair needs sustained governance reform.",
+                            "anchor": {"page": 1, "block_id": "p1-b1"},
+                        },
+                        {
+                            "unit_id": "u_evidence",
+                            "semantic_type": "evidence",
+                            "text": "The incident frequency rose by 186 percent year over year.",
+                            "quote": "The incident frequency rose by 186 percent year over year.",
+                            "anchor": {"page": 2, "block_id": "p2-b1"},
+                        },
+                        {
+                            "unit_id": "u_premise",
+                            "semantic_type": "premise",
+                            "text": "The recovery window is assumed to take one to two years.",
+                            "quote": "The recovery window is assumed to take one to two years.",
+                            "anchor": {"page": 3, "block_id": "p3-b1"},
+                        },
+                        {
+                            "unit_id": "u_contradiction",
+                            "semantic_type": "contradiction",
+                            "text": "Public emotion changed from shock to disappointment.",
+                            "quote": "Public emotion changed from shock to disappointment.",
+                            "anchor": {"page": 4, "block_id": "p4-b1"},
+                        },
+                        {
+                            "unit_id": "u_gap",
+                            "semantic_type": "open_question",
+                            "text": "Whether public trust can be rebuilt still requires monitoring.",
+                            "quote": "Whether public trust can be rebuilt still requires monitoring.",
+                            "anchor": {"page": 5, "block_id": "p5-b1"},
+                        },
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            response_id = "resp_prompt_b_units"
+        elif prompt_name.startswith("argument_relation_rebuild"):
+            raw_text = json.dumps(
+                {
+                    "relations": [
+                        {
+                            "source_unit_id": "u_evidence",
+                            "target_unit_id": "u_claim",
+                            "semantic_relation_type": "supports",
+                            "confidence_label": "EXTRACTED",
+                            "quote": "The incident frequency rose by 186 percent year over year.",
+                        },
+                        {
+                            "source_unit_id": "u_claim",
+                            "target_unit_id": "u_premise",
+                            "semantic_relation_type": "relies_on",
+                            "confidence_label": "EXTRACTED",
+                            "quote": "reputation repair needs sustained governance reform",
+                        },
+                        {
+                            "source_unit_id": "u_contradiction",
+                            "target_unit_id": "u_claim",
+                            "semantic_relation_type": "contradicts",
+                            "confidence_label": "EXTRACTED",
+                            "quote": "Public emotion changed from shock to disappointment.",
+                        },
+                        {
+                            "source_unit_id": "u_gap",
+                            "target_unit_id": "u_claim",
+                            "semantic_relation_type": "unclear",
+                            "confidence_label": "INFERRED",
+                            "quote": "Whether public trust can be rebuilt still requires monitoring.",
+                        },
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            response_id = "resp_prompt_b_relations"
+        else:
+            raw_text = (
+                '{"main_claims":[],"evidence":[],"assumptions":[],"conflicts":[],'
+                '"gaps":[],"methods":[],"findings":[],"limitations":[]}'
+            )
+            response_id = "resp_document_reader"
+        return LLMCallResult(
+            provider_backend="integration_test_backend",
+            provider_model="integration_test_model",
+            request_id=str(kwargs["request_id"]),
+            llm_response_id=response_id,
+            usage={"prompt_tokens": 80, "completion_tokens": 40, "total_tokens": 120},
+            raw_text=raw_text,
+            parsed_json=None,
+            fallback_used=False,
+            degraded=False,
+            degraded_reason=None,
+        )
+
     async def invoke_json(self, **kwargs: object) -> LLMCallResult:
         prompt_name = str(kwargs.get("prompt_name") or "")
         if prompt_name == "argument_unit_extraction":
