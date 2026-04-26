@@ -7,8 +7,10 @@ import {
   generateLiteratureFrontierHypothesis,
   getErrorMessage,
   getHypothesisPool,
+  getHypothesisPoolTrajectory,
   listHypothesisPoolCandidates,
   listHypothesisPoolRounds,
+  listHypothesisPoolTranscripts,
   patchHypothesisCandidate,
   pollJob,
   runHypothesisPoolRound,
@@ -49,6 +51,21 @@ function toArray(value: unknown): any[] {
 }
 
 function reasoningStepTexts(reasoningChain: any): string[] {
+  const explicitChain = reasoningChain?.reasoning_chain || {};
+  const explicitSteps = [
+    ...toArray(explicitChain?.evidence).map((item) => `证据：${normalizeText(item, '')}`),
+    normalizeText(explicitChain?.assumption, '').trim()
+      ? `前提/假设：${normalizeText(explicitChain?.assumption, '')}`
+      : '',
+    ...toArray(explicitChain?.intermediate_reasoning).map((item) => `中间推理：${normalizeText(item, '')}`),
+    normalizeText(explicitChain?.conclusion, '').trim()
+      ? `结论：${normalizeText(explicitChain?.conclusion, '')}`
+      : '',
+    normalizeText(explicitChain?.validation_need, '').trim()
+      ? `所需验证：${normalizeText(explicitChain?.validation_need, '')}`
+      : '',
+  ].filter(Boolean);
+  if (explicitSteps.length > 0) return explicitSteps;
   const steps = toArray(reasoningChain?.reasoning_steps)
     .map((step) => normalizeText(step?.text, '').trim())
     .filter(Boolean);
@@ -56,6 +73,52 @@ function reasoningStepTexts(reasoningChain: any): string[] {
   return toArray(reasoningChain?.mechanism_chain)
     .map((step) => normalizeText(step, '').trim())
     .filter(Boolean);
+}
+
+function reasoningNodes(reasoningChain: any): any[] {
+  const explicitNodes = toArray(reasoningChain?.reasoning_nodes).filter(
+    (node) => normalizeText(node?.node_id, '').trim() && normalizeText(node?.node_type, '').trim()
+  );
+  if (explicitNodes.length > 0) return explicitNodes;
+  const explicitChain = reasoningChain?.reasoning_chain || {};
+  return [
+    ...toArray(explicitChain?.evidence).map((content, index) => ({
+      node_id: `evidence:${index + 1}`,
+      node_type: 'evidence',
+      content,
+      source_refs: reasoningChain?.source_refs || [],
+    })),
+    normalizeText(explicitChain?.assumption, '').trim()
+      ? {
+          node_id: 'assumption:1',
+          node_type: 'assumption',
+          content: explicitChain?.assumption,
+          source_refs: [],
+        }
+      : null,
+    ...toArray(explicitChain?.intermediate_reasoning).map((content, index) => ({
+      node_id: `intermediate_reasoning:${index + 1}`,
+      node_type: 'intermediate_reasoning',
+      content,
+      source_refs: [],
+    })),
+    normalizeText(explicitChain?.conclusion, '').trim()
+      ? {
+          node_id: 'conclusion:1',
+          node_type: 'conclusion',
+          content: explicitChain?.conclusion,
+          source_refs: [],
+        }
+      : null,
+    normalizeText(explicitChain?.validation_need, '').trim()
+      ? {
+          node_id: 'validation_need:1',
+          node_type: 'validation_need',
+          content: explicitChain?.validation_need,
+          source_refs: [],
+        }
+      : null,
+  ].filter(Boolean);
 }
 
 function toPercent(value: unknown) {
@@ -90,6 +153,26 @@ function pickFrontierCandidates(candidates: any[], frontierSize: number) {
   return active.slice(0, Math.max(3, Math.min(5, frontierSize || 3)));
 }
 
+function objectOrNull(value: unknown): Record<string, any> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : null;
+}
+
+function getSupervisorArtifact(pool: any) {
+  const subgraph = objectOrNull(pool?.reasoning_subgraph);
+  if (!subgraph) return null;
+  const latestRoundSupervisor = objectOrNull(subgraph.latest_round_supervisor);
+  const supervisorPlan = objectOrNull(subgraph.supervisor_plan);
+  const artifact = latestRoundSupervisor || supervisorPlan;
+  if (!artifact) return null;
+  return {
+    artifact,
+    source: latestRoundSupervisor ? 'latest_round_supervisor' : 'supervisor_plan',
+    latestDecision: subgraph.latest_supervisor_decision,
+  };
+}
+
 type FrontierPageProps = {
   workspaceId: string;
   sources: SourceRecord[];
@@ -115,6 +198,8 @@ export function FrontierPage({
   const [pool, setPool] = useState<any>(null);
   const [poolCandidates, setPoolCandidates] = useState<any[]>([]);
   const [poolRounds, setPoolRounds] = useState<any[]>([]);
+  const [poolTranscripts, setPoolTranscripts] = useState<any[]>([]);
+  const [poolTrajectory, setPoolTrajectory] = useState<any>(null);
   const [isCreatingPool, setIsCreatingPool] = useState(false);
   const [isAutoRunning, setIsAutoRunning] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -128,6 +213,7 @@ export function FrontierPage({
   const [draftConclusion, setDraftConclusion] = useState('');
   const [draftReasoningSteps, setDraftReasoningSteps] = useState('');
   const [draftValidationSteps, setDraftValidationSteps] = useState('');
+  const [userHypothesisDraft, setUserHypothesisDraft] = useState('');
   const [previousConclusions, setPreviousConclusions] = useState<Record<string, string>>({});
 
   const sourceMap = useMemo(() => {
@@ -176,10 +262,12 @@ export function FrontierPage({
     if (!effectivePoolId) return null;
     setIsRefreshing(true);
     try {
-      const [nextPool, nextCandidates, nextRounds] = await Promise.all([
+      const [nextPool, nextCandidates, nextRounds, nextTranscripts, nextTrajectory] = await Promise.all([
         getHypothesisPool(effectivePoolId),
         listHypothesisPoolCandidates(effectivePoolId),
         listHypothesisPoolRounds(effectivePoolId),
+        listHypothesisPoolTranscripts(effectivePoolId),
+        getHypothesisPoolTrajectory(effectivePoolId),
       ]);
       setPool(nextPool);
       setPoolCandidates(toArray(nextCandidates?.items));
@@ -188,6 +276,8 @@ export function FrontierPage({
           (left, right) => Number(right?.round_number || 0) - Number(left?.round_number || 0)
         )
       );
+      setPoolTranscripts(toArray(nextTranscripts?.items).slice().reverse());
+      setPoolTrajectory(nextTrajectory);
       return nextPool;
     } finally {
       setIsRefreshing(false);
@@ -356,7 +446,18 @@ export function FrontierPage({
   };
 
   const runControl = async (
-    action: 'pause' | 'resume' | 'stop' | 'force_finalize' | 'disable_retrieval' | 'add_sources',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'stop'
+      | 'force_finalize'
+      | 'disable_retrieval'
+      | 'add_sources'
+      | 'edit_reasoning_node'
+      | 'delete_reasoning_node'
+      | 'add_reasoning_node'
+      | 'edit_candidate'
+      | 'add_user_hypothesis',
     sourceIds?: string[]
   ) => {
     const targetPoolId = String(poolId || '').trim();
@@ -413,15 +514,12 @@ export function FrontierPage({
         void runAutonomousLoop(targetPoolId);
       }
       if (action === 'force_finalize') {
-        const updatedStatus = String(updatedPool?.status || '').toLowerCase();
-        if (!INTERRUPT_SAFE_STATUSES.has(updatedStatus)) {
-          const accepted = await finalizeHypothesisPool(targetPoolId, {
-            workspace_id: workspaceId,
-            async_mode: true,
-          });
-          if (accepted?.job_id) {
-            await pollJob(String(accepted.job_id), 120000, 1200);
-          }
+        const accepted = await finalizeHypothesisPool(targetPoolId, {
+          workspace_id: workspaceId,
+          async_mode: true,
+        });
+        if (accepted?.job_id) {
+          await pollJob(String(accepted.job_id), 120000, 1200);
         }
       }
       await refreshPoolState(targetPoolId);
@@ -521,7 +619,87 @@ export function FrontierPage({
     }
   };
 
+  const applyReasoningNodeControl = async (
+    candidate: any,
+    action: 'edit_reasoning_node' | 'delete_reasoning_node' | 'add_reasoning_node',
+    node?: any
+  ) => {
+    const targetPoolId = String(poolId || '').trim();
+    const candidateId = String(candidate?.candidate_id || '').trim();
+    if (!targetPoolId || !candidateId) return;
+    const nodeType =
+      action === 'add_reasoning_node'
+        ? String(window.prompt('节点类型：evidence / assumption / intermediate_reasoning / conclusion / validation_need', 'intermediate_reasoning') || '').trim()
+        : String(node?.node_type || '').trim();
+    if (!nodeType) return;
+    const currentContent = String(node?.content || '');
+    const nextContent =
+      action === 'delete_reasoning_node'
+        ? currentContent
+        : String(window.prompt('节点内容', currentContent) || '').trim();
+    if (action !== 'delete_reasoning_node' && !nextContent) return;
+    if (
+      action === 'delete_reasoning_node' &&
+      !window.confirm('删除这个推理节点？后续审查和排名会失效并要求重检。')
+    ) {
+      return;
+    }
+    try {
+      await controlHypothesisPool(targetPoolId, {
+        workspace_id: workspaceId,
+        action,
+        candidate_id: candidateId,
+        node: {
+          node_id: String(node?.node_id || ''),
+          node_type: nodeType as any,
+          content: nextContent,
+          source_refs: toArray(node?.source_refs),
+        },
+        control_reason: 'frontier_reasoning_graph_edit',
+      });
+      appendLog(`推理图节点已更新：${action} · candidate=${candidateId}`);
+      showToast('已更新推理图，候选需要重新 Reflection/Ranking');
+      await refreshPoolState(targetPoolId);
+    } catch (error) {
+      showToast(getErrorMessage(error));
+      appendLog(`推理图节点更新失败：${getErrorMessage(error)}`);
+    }
+  };
+
+  const addUserHypothesis = async () => {
+    const targetPoolId = String(poolId || '').trim();
+    const statement = userHypothesisDraft.trim();
+    if (!targetPoolId || !statement) return;
+    try {
+      await controlHypothesisPool(targetPoolId, {
+        workspace_id: workspaceId,
+        action: 'add_user_hypothesis',
+        user_hypothesis: {
+          statement,
+          title: '用户新增假设',
+          hypothesis_level_conclusion: statement,
+          reasoning_chain: {
+            evidence: [],
+            assumption: '用户新增假设，需要 Reflection agent 审查其证据与前提。',
+            intermediate_reasoning: [],
+            conclusion: statement,
+            validation_need: '由后续 Reflection/Ranking 重新确定验证路径。',
+          },
+        },
+        control_reason: 'frontier_user_added_hypothesis',
+      });
+      setUserHypothesisDraft('');
+      appendLog('已加入用户假设，等待下一轮 Reflection/Ranking');
+      showToast('用户假设已加入前沿池');
+      await refreshPoolState(targetPoolId);
+    } catch (error) {
+      showToast(getErrorMessage(error));
+      appendLog(`新增用户假设失败：${getErrorMessage(error)}`);
+    }
+  };
+
   const latestRound = poolRounds[0] || null;
+  const supervisorArtifact = useMemo(() => getSupervisorArtifact(pool), [pool]);
   const reviewSummary = useMemo(() => {
     const summary = { survive: 0, revise: 0, drop: 0, unknown: 0 };
     for (const candidate of poolCandidates) {
@@ -591,6 +769,29 @@ export function FrontierPage({
             </button>
             <button className="btn" onClick={() => goto('confirm')}>返回候选确认</button>
           </div>
+          {poolId && (
+            <div className="ev-card" style={{ marginBottom: 0 }}>
+              <div className="ev-title">用户新增假设</div>
+              <div className="ev-body">
+                新增后不会直接进入最终前沿；它会被标记为 pending，并强制进入下一轮 Reflection/Ranking。
+              </div>
+              <textarea
+                className="paste-area"
+                style={{ minHeight: '72px', marginTop: '8px' }}
+                value={userHypothesisDraft}
+                onChange={(event) => setUserHypothesisDraft(event.target.value)}
+                placeholder="写入你想加入推理图的新假设..."
+              />
+              <button
+                className="btn"
+                style={{ marginTop: '8px' }}
+                onClick={() => void addUserHypothesis()}
+                disabled={!userHypothesisDraft.trim()}
+              >
+                加入用户假设
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -656,6 +857,44 @@ export function FrontierPage({
             </button>
           </div>
         </div>
+        {supervisorArtifact && (() => {
+          const artifact = supervisorArtifact.artifact;
+          const retrievalIntent = objectOrNull(artifact.retrieval_intent) || {};
+          const decision = normalizeText(artifact.decision ?? supervisorArtifact.latestDecision);
+          const isSupervisorRetrievalPause =
+            decision.toLowerCase() === 'retrieve' &&
+            retrievalIntent.needed === true &&
+            String(pool?.status || '').toLowerCase() === 'paused';
+          return (
+            <div className="ev-card" style={{ marginBottom: '8px' }}>
+              <div className="ev-title">Supervisor Decision</div>
+              <div className="ev-body">
+                source={supervisorArtifact.source} · latest_supervisor_decision={decision}
+              </div>
+              {isSupervisorRetrievalPause && (
+                <div className="ev-body" style={{ marginTop: '6px' }}>
+                  Supervisor 决策要求补证据，pool 已暂停等待 evidence gap 处理；这里展示的是 retrieval_intent，不表示主动检索已执行。
+                </div>
+              )}
+              <div className="ev-body" style={{ marginTop: '6px' }}>
+                <strong>decision_rationale：</strong> {normalizeText(artifact.decision_rationale)}
+              </div>
+              <div className="ev-body" style={{ marginTop: '6px' }}>
+                <strong>strategy：</strong> {normalizeText(artifact.strategy)}
+              </div>
+              <div className="ev-body" style={{ marginTop: '6px' }}>
+                <strong>user_control_state：</strong> {normalizeText(artifact.user_control_state)}
+              </div>
+              <div className="ev-body" style={{ marginTop: '6px' }}>
+                <strong>retrieval_intent：</strong> needed={String(retrievalIntent.needed === true)} · evidence_gap=
+                {normalizeText(retrievalIntent.evidence_gap)} · scope={normalizeText(retrievalIntent.scope)}
+              </div>
+              <div className="ev-body" style={{ marginTop: '6px' }}>
+                <strong>stop_reason：</strong> {normalizeText(artifact.stop_reason)}
+              </div>
+            </div>
+          );
+        })()}
         <div className="ev-card" style={{ marginBottom: 0 }}>
           <div className="ev-title">当前 Review Gate</div>
           <div className="ev-body">
@@ -680,10 +919,15 @@ export function FrontierPage({
             {frontierCards.map((candidate) => {
               const reasoningChain = candidate?.reasoning_chain || {};
               const sourceRefs = toArray(reasoningChain?.source_refs);
-              const requiredValidation = toArray(reasoningChain?.required_validation);
+              const requiredValidation = [
+                ...toArray(reasoningChain?.required_validation),
+                normalizeText(reasoningChain?.reasoning_chain?.validation_need, '').trim(),
+              ].filter(Boolean);
               const mechanismChain = reasoningStepTexts(reasoningChain);
+              const editableNodes = reasoningNodes(reasoningChain);
               const confidenceBundle = reasoningChain?.confidence_bundle || {};
               const reviewHistory = toArray(reasoningChain?.review_history);
+              const interventionHistory = toArray(reasoningChain?.user_interventions);
               const reviewStatus = normalizeText(reasoningChain?.review_status, 'unknown');
               const retrievalOrigin = normalizeText(
                 reasoningChain?.retrieval_origin ?? candidate?.retrieval_origin,
@@ -727,6 +971,58 @@ export function FrontierPage({
                     )}
                   </div>
                   <div className="ev-body" style={{ marginTop: '6px' }}>
+                    <strong>可编辑推理图节点：</strong>{' '}
+                    {editableNodes.length === 0 ? (
+                      <span>--</span>
+                    ) : (
+                      <div style={{ display: 'grid', gap: '6px', marginTop: '6px' }}>
+                        {editableNodes.map((node) => (
+                          <div
+                            key={`${candidateId}-${normalizeText(node?.node_id)}`}
+                            style={{
+                              border: '1px solid rgba(148, 163, 184, 0.28)',
+                              borderRadius: '8px',
+                              padding: '8px',
+                            }}
+                          >
+                            <div>
+                              <strong>{normalizeText(node?.node_type)}</strong> · {normalizeText(node?.node_id)}
+                            </div>
+                            <div style={{ marginTop: '4px' }}>{normalizeText(node?.content)}</div>
+                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
+                              <button
+                                className="btn"
+                                onClick={() => void applyReasoningNodeControl(candidate, 'edit_reasoning_node', node)}
+                              >
+                                改节点
+                              </button>
+                              <button
+                                className="btn"
+                                onClick={() => void applyReasoningNodeControl(candidate, 'delete_reasoning_node', node)}
+                              >
+                                删节点
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      className="btn"
+                      style={{ marginTop: '8px' }}
+                      onClick={() => void applyReasoningNodeControl(candidate, 'add_reasoning_node')}
+                    >
+                      加节点
+                    </button>
+                    {(reasoningChain?.requires_recheck || reasoningChain?.requires_rerank) && (
+                      <div className="text-muted" style={{ marginTop: '6px' }}>
+                        invalidation: requires_recheck={String(Boolean(reasoningChain?.requires_recheck))} ·
+                        requires_rerank={String(Boolean(reasoningChain?.requires_rerank))} · reason=
+                        {normalizeText(reasoningChain?.recheck_reason)}
+                      </div>
+                    )}
+                  </div>
+                  <div className="ev-body" style={{ marginTop: '6px' }}>
                     <strong>所需验证：</strong>
                     {requiredValidation.length > 0 ? (
                       <ul style={{ margin: '6px 0 0 18px' }}>
@@ -754,6 +1050,23 @@ export function FrontierPage({
                   <div className="ev-body" style={{ marginTop: '6px' }}>
                     <strong>反思状态：</strong> {reviewStatus} · history={reviewHistory.length} · revise_count=
                     {Number(reasoningChain?.revise_count || 0)} · {String(candidate?.origin_type || '').startsWith('evolution') ? '来自 Evolution' : '来自 Generation'}
+                  </div>
+                  <div className="ev-body" style={{ marginTop: '6px' }}>
+                    <strong>用户干预轨迹：</strong> {interventionHistory.length} 条
+                    {interventionHistory.length > 0 && (
+                      <ul style={{ margin: '6px 0 0 18px' }}>
+                        {interventionHistory.slice(-3).map((item, index) => (
+                          <li key={`${candidateId}-intervention-${index}`}>
+                            action={normalizeText(item?.action)} · request={normalizeText(item?.request_id)} · at=
+                            {normalizeText(item?.created_at)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="ev-body" style={{ marginTop: '6px' }}>
+                    <strong>审计 transcript：</strong> generation={normalizeText(reasoningChain?.generation_transcript_id)} · latest_review=
+                    {normalizeText(reviewHistory[reviewHistory.length - 1]?.transcript_id)}
                   </div>
                   <div className="ev-body" style={{ marginTop: '6px' }}>
                     <strong>置信度：</strong> {normalizeText(confidenceBundle?.confidence_level, 'unknown')} · evidence=
@@ -835,6 +1148,31 @@ export function FrontierPage({
         </div>
         <div className="ev-card" style={{ marginBottom: 0 }}>
           <div className="ev-title">Activity</div>
+          {poolTrajectory && (
+            <div className="ev-body" style={{ marginBottom: '8px' }}>
+              <strong>Trajectory：</strong> events=
+              {toArray(poolTrajectory?.chronological_events).length} · candidate_lineage=
+              {toArray(poolTrajectory?.candidate_lineage).length} · retrieval=
+              {normalizeText(poolTrajectory?.service_traces?.retrieval?.status, 'none')} · proximity_edges=
+              {toArray(poolTrajectory?.service_traces?.proximity?.edges).length}
+            </div>
+          )}
+          {poolTranscripts.length > 0 && (
+            <div className="ev-body" style={{ marginBottom: '8px' }}>
+              <strong>Agent transcripts：</strong>{' '}
+              {poolTranscripts.slice(0, 8).map((item, index) => (
+                <span
+                  key={String(
+                    item?.transcript_id ||
+                      `${item?.agent_name || 'agent'}-${item?.created_at || 'unknown'}-${index}`
+                  )}
+                  style={{ marginRight: '8px' }}
+                >
+                  {normalizeText(item?.agent_name)}:{normalizeText(item?.status)}
+                </span>
+              ))}
+            </div>
+          )}
           {activityLog.length === 0 ? (
             <div className="ev-body">暂无执行日志。</div>
           ) : (

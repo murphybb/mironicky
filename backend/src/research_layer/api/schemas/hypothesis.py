@@ -11,13 +11,11 @@ HYPOTHESIS_POOL_STATUS_PATTERN = (
     r"^(queued|running|paused|stopping|stopped|finalizing|finalized|failed|cancelled)$"
 )
 HYPOTHESIS_CANDIDATE_STATUS_PATTERN = r"^(alive|pruned|finalized|rejected)$"
-HYPOTHESIS_ROUND_STATUS_PATTERN = (
-    r"^(running|completed|failed|cancelled)$"
-)
+HYPOTHESIS_ROUND_STATUS_PATTERN = r"^(running|completed|failed|cancelled)$"
 
 
 class HypothesisActiveRetrievalConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     max_papers_per_burst: int = Field(default=3, ge=1, le=10)
     max_bursts: int = Field(default=2, ge=0, le=10)
 
@@ -66,6 +64,8 @@ class HypothesisGenerateRequest(WorkspaceScopedBody):
     @model_validator(mode="after")
     def _validate_mode_inputs(self) -> "HypothesisGenerateRequest":
         if self.mode == "literature_frontier":
+            if "active_retrieval" not in self.model_fields_set:
+                self.active_retrieval = HypothesisActiveRetrievalConfig(enabled=True)
             if not self.source_ids:
                 raise ValueError(
                     "source_ids must not be empty when mode is literature_frontier"
@@ -79,6 +79,12 @@ class HypothesisGenerateRequest(WorkspaceScopedBody):
                     "research_goal must not be empty when mode is literature_frontier"
                 )
             return self
+        if (
+            self.mode == "single_candidate"
+            and "active_retrieval" in self.model_fields_set
+            and self.active_retrieval.enabled
+        ):
+            raise ValueError("active_retrieval is only supported for pool modes")
         if not self.trigger_ids:
             raise ValueError("trigger_ids must not be empty for trigger-driven modes")
         return self
@@ -93,11 +99,59 @@ class HypothesisPoolFinalizeRequest(WorkspaceScopedBody):
     async_mode: bool = True
 
 
+class HypothesisReasoningNodePatch(BaseModel):
+    node_id: str | None = None
+    node_type: str = Field(
+        pattern=r"^(evidence|assumption|intermediate_reasoning|conclusion|validation_need)$"
+    )
+    content: str = Field(default="")
+    source_refs: list[dict[str, object]] = Field(default_factory=list)
+
+
+class HypothesisCandidatePatchPayload(BaseModel):
+    title: str | None = None
+    statement: str | None = None
+    hypothesis_level_conclusion: str | None = None
+
+
+class HypothesisUserHypothesisPayload(BaseModel):
+    statement: str = Field(min_length=1)
+    title: str | None = None
+    hypothesis_level_conclusion: str | None = None
+    reasoning_chain: dict[str, object] = Field(default_factory=dict)
+
+
 class HypothesisPoolControlRequest(WorkspaceScopedBody):
     action: str = Field(
-        pattern=r"^(pause|resume|stop|force_finalize|disable_retrieval|add_sources)$"
+        pattern=(
+            r"^(pause|resume|stop|force_finalize|disable_retrieval|add_sources|"
+            r"edit_reasoning_node|delete_reasoning_node|add_reasoning_node|"
+            r"edit_candidate|add_user_hypothesis)$"
+        )
     )
     source_ids: list[str] = Field(default_factory=list)
+    candidate_id: str | None = None
+    node: HypothesisReasoningNodePatch | None = None
+    candidate_patch: HypothesisCandidatePatchPayload | None = None
+    user_hypothesis: HypothesisUserHypothesisPayload | None = None
+    control_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_control_payload(self) -> "HypothesisPoolControlRequest":
+        if self.action in {
+            "edit_reasoning_node",
+            "delete_reasoning_node",
+            "add_reasoning_node",
+        }:
+            if not self.candidate_id or self.node is None:
+                raise ValueError(f"{self.action} requires candidate_id and node")
+        if self.action == "edit_candidate" and (
+            not self.candidate_id or self.candidate_patch is None
+        ):
+            raise ValueError("edit_candidate requires candidate_id and candidate_patch")
+        if self.action == "add_user_hypothesis" and self.user_hypothesis is None:
+            raise ValueError("add_user_hypothesis requires user_hypothesis")
+        return self
 
 
 class HypothesisCandidatePatchRequest(WorkspaceScopedBody):
@@ -267,6 +321,40 @@ class HypothesisMatchResponse(BaseModel):
     right_elo_after: float
     judge_trace: dict[str, object] = Field(default_factory=dict)
     created_at: datetime | None = None
+
+
+class HypothesisAgentTranscriptResponse(BaseModel):
+    transcript_id: str
+    pool_id: str
+    round_id: str | None = None
+    candidate_id: str | None = None
+    match_id: str | None = None
+    agent_name: str
+    agent_role: str
+    prompt_template: str
+    input_payload: dict[str, object] = Field(default_factory=dict)
+    output_payload: dict[str, object] | list[object] = Field(default_factory=dict)
+    provider: str | None = None
+    model: str | None = None
+    token_usage: dict[str, object] = Field(default_factory=dict)
+    latency_ms: int = 0
+    status: str
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+
+
+class HypothesisAgentTranscriptListResponse(BaseModel):
+    items: list[HypothesisAgentTranscriptResponse]
+    total: int
+
+
+class HypothesisPoolTrajectoryResponse(BaseModel):
+    pool_id: str
+    pool: dict[str, object] = Field(default_factory=dict)
+    chronological_events: list[dict[str, object]] = Field(default_factory=list)
+    candidate_lineage: list[dict[str, object]] = Field(default_factory=list)
+    service_traces: dict[str, object] = Field(default_factory=dict)
 
 
 class HypothesisSearchTreeNodeResponse(BaseModel):

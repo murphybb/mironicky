@@ -19,6 +19,8 @@ from research_layer.api.schemas.common import (
     ResearchErrorCode,
 )
 from research_layer.api.schemas.hypothesis import (
+    HypothesisAgentTranscriptListResponse,
+    HypothesisAgentTranscriptResponse,
     HypothesisCandidatePatchRequest,
     HypothesisCandidateListResponse,
     HypothesisCandidateResponse,
@@ -30,6 +32,7 @@ from research_layer.api.schemas.hypothesis import (
     HypothesisPoolFinalizeRequest,
     HypothesisPoolResponse,
     HypothesisPoolRoundRequest,
+    HypothesisPoolTrajectoryResponse,
     HypothesisResponse,
     HypothesisRoundListResponse,
     HypothesisSearchTreeNodeResponse,
@@ -232,6 +235,7 @@ class ResearchHypothesisController(BaseController):
                     preference_profile=preference_profile,
                     failure_mode=failure_mode,
                     allow_fallback=allow_fallback,
+                    active_retrieval=active_retrieval,
                 )
                 result_ref = {
                     "resource_type": "hypothesis_pool",
@@ -251,10 +255,7 @@ class ResearchHypothesisController(BaseController):
                     "resource_type": "hypothesis",
                     "resource_id": str(hypothesis["hypothesis_id"]),
                 }
-            STORE.finish_job_success(
-                job_id=job_id,
-                result_ref=result_ref,
-            )
+            STORE.finish_job_success(job_id=job_id, result_ref=result_ref)
         except HypothesisServiceError as exc:
             error = {
                 "error_code": exc.error_code,
@@ -320,7 +321,9 @@ class ResearchHypothesisController(BaseController):
         response_model=HypothesisCandidateListResponse,
         responses={404: {"model": ErrorResponse}},
     )
-    async def list_pool_candidates(self, pool_id: str) -> HypothesisCandidateListResponse:
+    async def list_pool_candidates(
+        self, pool_id: str
+    ) -> HypothesisCandidateListResponse:
         pool = self._hypothesis_service.get_pool(pool_id=pool_id)
         ensure(
             pool is not None,
@@ -333,9 +336,7 @@ class ResearchHypothesisController(BaseController):
             item
             for item in self._hypothesis_service.list_pool_candidates(pool_id=pool_id)
         ]
-        return HypothesisCandidateListResponse(
-            items=items, total=len(items)
-        )
+        return HypothesisCandidateListResponse(items=items, total=len(items))
 
     @patch(
         "/hypotheses/candidates/{candidate_id}",
@@ -378,7 +379,9 @@ class ResearchHypothesisController(BaseController):
             message="hypothesis pool not found",
             details={"pool_id": pool_id},
         )
-        items = [item for item in self._hypothesis_service.list_pool_rounds(pool_id=pool_id)]
+        items = [
+            item for item in self._hypothesis_service.list_pool_rounds(pool_id=pool_id)
+        ]
         return HypothesisRoundListResponse(items=items, total=len(items))
 
     @post(
@@ -386,7 +389,9 @@ class ResearchHypothesisController(BaseController):
         response_model=HypothesisPoolResponse,
         responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     )
-    async def control_pool(self, pool_id: str, request: Request) -> HypothesisPoolResponse:
+    async def control_pool(
+        self, pool_id: str, request: Request
+    ) -> HypothesisPoolResponse:
         payload = await parse_request_model(request, HypothesisPoolControlRequest)
         request_id = get_request_id(request.headers.get("x-request-id"))
         try:
@@ -396,6 +401,19 @@ class ResearchHypothesisController(BaseController):
                 request_id=request_id,
                 action=payload.action,
                 source_ids=payload.source_ids,
+                candidate_id=payload.candidate_id,
+                node=payload.node.model_dump() if payload.node is not None else None,
+                candidate_patch=(
+                    payload.candidate_patch.model_dump(exclude_none=True)
+                    if payload.candidate_patch is not None
+                    else None
+                ),
+                user_hypothesis=(
+                    payload.user_hypothesis.model_dump()
+                    if payload.user_hypothesis is not None
+                    else None
+                ),
+                control_reason=payload.control_reason,
             )
         except HypothesisServiceError as exc:
             raise_http_error(
@@ -583,29 +601,19 @@ class ResearchHypothesisController(BaseController):
         )
 
     async def _run_pool_finalize_job(
-        self,
-        *,
-        job_id: str,
-        request_id: str,
-        pool_id: str,
-        workspace_id: str,
+        self, *, job_id: str, request_id: str, pool_id: str, workspace_id: str
     ) -> None:
         STORE.start_job(job_id)
         try:
             finalized = await self._hypothesis_service.finalize_pool(
-                pool_id=pool_id,
-                workspace_id=workspace_id,
-                request_id=request_id,
+                pool_id=pool_id, workspace_id=workspace_id, request_id=request_id
             )
             resource_id = ""
             if finalized:
                 resource_id = str(finalized[0].get("hypothesis_id", ""))
             STORE.finish_job_success(
                 job_id=job_id,
-                result_ref={
-                    "resource_type": "hypothesis",
-                    "resource_id": resource_id,
-                },
+                result_ref={"resource_type": "hypothesis", "resource_id": resource_id},
             )
         except HypothesisServiceError as exc:
             error = {
@@ -661,11 +669,53 @@ class ResearchHypothesisController(BaseController):
         return HypothesisMatchResponse.model_validate(match)
 
     @get(
+        "/hypotheses/pools/{pool_id}/transcripts",
+        response_model=HypothesisAgentTranscriptListResponse,
+        responses={404: {"model": ErrorResponse}},
+    )
+    async def list_pool_agent_transcripts(
+        self, pool_id: str
+    ) -> HypothesisAgentTranscriptListResponse:
+        pool = self._hypothesis_service.get_pool(pool_id=pool_id)
+        ensure(
+            pool is not None,
+            status_code=404,
+            code=ResearchErrorCode.NOT_FOUND.value,
+            message="hypothesis pool not found",
+            details={"pool_id": pool_id},
+        )
+        items = [
+            HypothesisAgentTranscriptResponse.model_validate(item)
+            for item in STORE.list_hypothesis_agent_transcripts(pool_id=pool_id)
+        ]
+        return HypothesisAgentTranscriptListResponse(items=items, total=len(items))
+
+    @get(
+        "/hypotheses/pools/{pool_id}/trajectory",
+        response_model=HypothesisPoolTrajectoryResponse,
+        responses={404: {"model": ErrorResponse}},
+    )
+    async def get_pool_trajectory(
+        self, pool_id: str
+    ) -> HypothesisPoolTrajectoryResponse:
+        trajectory = self._hypothesis_service.get_pool_trajectory(pool_id=pool_id)
+        ensure(
+            trajectory is not None,
+            status_code=404,
+            code=ResearchErrorCode.NOT_FOUND.value,
+            message="hypothesis pool not found",
+            details={"pool_id": pool_id},
+        )
+        return HypothesisPoolTrajectoryResponse.model_validate(trajectory)
+
+    @get(
         "/hypotheses/search-tree/{node_id}",
         response_model=HypothesisSearchTreeNodeResponse,
         responses={404: {"model": ErrorResponse}},
     )
-    async def get_search_tree_node(self, node_id: str) -> HypothesisSearchTreeNodeResponse:
+    async def get_search_tree_node(
+        self, node_id: str
+    ) -> HypothesisSearchTreeNodeResponse:
         node = self._hypothesis_service.get_search_tree_node(tree_node_id=node_id)
         ensure(
             node is not None,
