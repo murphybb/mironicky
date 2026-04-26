@@ -38,7 +38,12 @@ class _Gateway:
         prompt_name = str(kwargs["prompt_name"])
         agent_name = prompt_name.rsplit(".", 1)[-1]
         self.calls.append(agent_name)
-        parsed = _payload(agent_name)
+        input_payload = kwargs.get("input_payload")
+        messages = kwargs.get("messages")
+        parsed = _payload(
+            agent_name,
+            input_payload if isinstance(input_payload, dict) else {},
+        )
         return LLMCallResult(
             provider_backend="openai",
             provider_model="gpt-4.1-mini",
@@ -53,11 +58,26 @@ class _Gateway:
         )
 
 
-def _payload(agent_name: str) -> dict[str, object]:
+def _payload(
+    agent_name: str,
+    input_payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    input_payload = input_payload or {}
     if agent_name == "supervisor":
         return {
             "decision": "continue",
             "strategy": "test",
+            "decision_rationale": "Test supervisor allows the mocked agent loop to continue with source-grounded evidence.",
+            "evidence_coverage_assessment": {
+                "status": "sufficient",
+                "evidence_packets_count": 1,
+            },
+            "ranking_stability_assessment": {
+                "status": "not_ranked_yet",
+                "candidate_count": 0,
+            },
+            "user_control_state": "none",
+            "retrieval_intent": {"needed": False},
             "next_actions": ["reflect", "rank", "evolve", "meta_review"],
         }
     if agent_name == "generation":
@@ -90,12 +110,28 @@ def _payload(agent_name: str) -> dict[str, object]:
         }
     if agent_name == "reflection":
         return {
-            "verdict": "survive",
-            "strengths": ["has provenance"],
-            "weaknesses": ["needs controlled test"],
-            "missing_evidence": [],
-            "testability_issues": [],
-            "weakest_step_ref": {},
+            "overall_verdict": "survive",
+            "initial_review": {
+                "recommendation": "survive",
+                "findings": ["candidate has a clear mechanism"],
+                "source_refs": [{"source_id": "source_test"}],
+            },
+            "literature_grounding_review": {
+                "recommendation": "survive",
+                "findings": ["candidate cites uploaded evidence"],
+                "evidence_refs": ["claim_test"],
+            },
+            "deep_assumption_verification": {
+                "recommendation": "survive",
+                "findings": ["assumption is explicit and testable"],
+                "grounding": ["airflow evaporation mechanism"],
+            },
+            "simulation_or_counterexample_review": {
+                "recommendation": "survive",
+                "findings": ["controlled airflow test can falsify the claim"],
+                "recommended_actions": ["run experiment"],
+            },
+            "targeted_node_refs": [{"node_id": "claim_test"}],
             "recommended_actions": ["run experiment"],
             "score_delta": 0.05,
         }
@@ -103,41 +139,44 @@ def _payload(agent_name: str) -> dict[str, object]:
         return {
             "winner_candidate_id": "USE_LEFT",
             "match_reason": "left has stronger validation framing",
-            "compare_vector": {"testability": 0.7},
+            "debate_transcript": [
+                {
+                    "speaker": "left",
+                    "argument": "Uses uploaded evidence and a falsifiable validation path.",
+                },
+                {
+                    "speaker": "right",
+                    "argument": "Comparable but less specific on validation.",
+                },
+            ],
+            "loser_failure_modes": ["less specific validation plan"],
+            "match_scheduling_reason": "pairwise Elo comparison among survived candidates",
+            "confidence_in_judgment": 0.76,
+            "elo_delta": {"winner": 16, "loser": -16},
+            "criterion_scores": {
+                "evidence_strength": 0.7,
+                "novelty": 0.6,
+                "testability": 0.8,
+                "mechanism_specificity": 0.7,
+                "validation_cost": 0.3,
+                "contradiction_risk": 0.2,
+            },
         }
     if agent_name == "evolution":
         return {
-            "children": [
-                {
-                    "title": "LLM evolved airflow hypothesis",
-                    "statement": "Airflow and temperature drop jointly determine fogging recovery.",
-                    "hypothesis_level_conclusion": "Airflow effect depends on temperature drop.",
-                    "summary": "Evolved interaction hypothesis.",
-                    "rationale": "Adds moderator from uploaded conflict.",
-                    "testability_hint": "Test airflow x temperature interaction.",
-                    "novelty_hint": "Interaction mechanism.",
-                    "confidence_hint": 0.64,
-                    "suggested_next_steps": ["fit interaction model"],
-                    "source_refs": [
-                        {
-                            "source_id": "source_test",
-                            "source_span": {"text": "temperature drop amplifies fog"},
-                            "evidence_refs": ["claim_temp"],
-                        }
-                    ],
-                    "reasoning_chain": {
-                        "evidence": ["temperature drop amplifies fog"],
-                        "assumption": "Temperature drop moderates evaporation.",
-                        "intermediate_reasoning": ["Cooling can offset airflow."],
-                        "conclusion": "Recovery depends on airflow x temperature.",
-                        "validation_need": "Interaction test.",
-                    },
-                }
-            ],
-            "change_summary": "Added temperature moderator.",
+            "children": [],
+            "change_summary": "No safe evolved child produced in this legacy flow mock.",
         }
     if agent_name == "meta_review":
         return {
+            "generation_feedback": ["keep source-grounded mechanisms"],
+            "reflection_feedback": ["continue requiring explicit validation"],
+            "ranking_feedback": ["prefer candidates with falsifiable tests"],
+            "research_overview": {
+                "best_current_direction": "airflow-mediated fogging recovery",
+                "frontier_summary": "Mock pool has source-grounded candidates for the integration flow.",
+            },
+            "stop_or_continue_rationale": "continue while validation paths remain available",
             "recurring_issues": ["needs experiment"],
             "strong_patterns": ["source grounded"],
             "weak_patterns": [],
