@@ -1,4 +1,5 @@
 # Runtime artifacts
+.hypothesis/
 .playwright-cli/
 backend/runtime-check/
 frontend/runtime-check/
